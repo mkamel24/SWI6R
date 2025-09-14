@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-# ------------------------------------------------------------
-# SWI Wedge Length Ratio (L/Lo) — Smart Predictor (CatBoost)
-#   - Auto-loads model from: models/CGB.joblib (exact path & name)
-#   - Clean card-style GUI + Explain (SHAP) + Batch + History + Article Info
-#   - Paper title header (reduced font) + updated authors/affiliations
-#   - Deterministic CPU inference where possible
-# ------------------------------------------------------------
+# Streamlit deployment of SWI Wedge Length Ratio – Smart Predictor
+# Layout:
+#   Left  = Inputs + large prediction readout
+#   Right = Reference sketch (auto-fit, with upload fallback)
+#   Bottom = Predict, Clear, Recall, Save Inputs (JSON), Load Inputs
+# Tabs:
+#   Predict, Explain (SHAP), Batch, History, Article Info
+# Deterministic CPU predictions; cached model; no unhashable-arg caching.
 
-import io
 import json
 from io import BytesIO
 from pathlib import Path
@@ -21,11 +21,11 @@ import joblib
 import shap
 import matplotlib.pyplot as plt
 
-# ==============================
+# ------------------------------
 # Page / theme config
-# ==============================
+# ------------------------------
 st.set_page_config(
-    page_title="SWI Wedge Length Ratio – Smart Predictor (L/Lo, CatBoost)",
+    page_title="Machine Learning-Based Modeling of Artificial Recharge and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers",
     page_icon="🌊",
     layout="wide",
 )
@@ -84,13 +84,19 @@ st.markdown(
         border: 1px solid var(--ui-border) !important;
         border-radius: 10px !important;
       }
+      .stSelectbox div[role="combobox"] {
+        background: var(--ui-card);
+        border: 1px solid var(--ui-border);
+        border-radius: 10px;
+        color: var(--ui-text);
+      }
 
       /* Buttons */
       .stButton > button[kind="primary"] {
-        background: #ffffff !important;
-        color: #000000 !important;
-        border: 1px solid var(--ui-border) !important;
-        border-radius: 10px;
+        background: #ffffff !important;  /* White background for buttons */
+        color: #000000 !important;       /* Black text color */
+        border: 1px solid var(--ui-border) !important; /* Light border */
+        border-radius: 10px;             /* Rounded corners */
         padding: .6rem 1rem;
         font-weight: 800;
       }
@@ -104,7 +110,9 @@ st.markdown(
       }
 
       /* Tabs */
-      .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+      .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+      }
       .stTabs [data-baseweb="tab"] {
         background: #ffffff;
         color: var(--ui-text);
@@ -141,145 +149,105 @@ st.markdown(
         color: var(--ui-text);
       }
 
-      .muted { color: var(--ui-text-muted); font-size: 0.95rem; }
+      .muted {
+        color: var(--ui-text-muted);
+        font-size: 0.95rem;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ==============================
-# Paper strings (updated)
-# ==============================
-ARTICLE_TITLE = (
-    "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for "
-    "Saltwater Intrusion Control with Explainable ML and GUI Deployment"
-)
-ARTICLE_AUTHORS_HTML = (
-    "Mohamed Kamel Elshaarawy<sup>1,*</sup> &amp; "
-    "Asaad M. Armanuos<sup>2,*</sup>"
-)
-ARTICLE_AFFILS_HTML = (
-    "1 Civil Engineering Department, Faculty of Engineering, Horus University-Egypt, "
-    "New Damietta 34517, Egypt; <a href='mailto:melshaarawy@horus.edu.eg'>melshaarawy@horus.edu.eg</a> (M.K.E.)<br>"
-    "2 Irrigation and Hydraulics Engineering Department, Faculty of Engineering, Tanta University, "
-    "Tanta 31733, Egypt; <a href='mailto:asaad.matter@f-eng.tanta.edu.eg'>asaad.matter@f-eng.tanta.edu.eg</a> (A.M.A.)<br>"
-    "*Corresponding author"
-)
-ARTICLE_JOURNAL = "Catena"
-
-# ==============================
-# Config / constants
-# ==============================
-MODEL_PATH = Path("models/CGB.joblib")  # exact location & name
+# ------------------------------
+# Config / constants (ADAPTED TO YOUR VARIABLES)
+# ------------------------------
+MODEL_PATH = "C:/Users/asus1/Desktop/CGB1.joblib"  # your CatBoost (or other) model file
 IMAGE_CANDIDATES = [
-    Path("assets/sketch22.png"),
     Path("assets/sketch.png"),
-    Path("sketch22.png"),
+    Path("assets/sketch22.png"),
     Path("sketch.png"),
+    Path("sketch22.png"),
+    Path("C:/Users/asus1/Desktop/sketch.png"),
 ]
 
-# Feature names (MUST match training order)
-FEATURE_KEYS = [
-    "ρs/ρf",
-    "K/Ko",
-    "Qi/(Ko·Lo²)",
-    "i",
-    "Xi/Lo",
-    "Yi/Lo",
-    "Xb/Lo",
-    "Db/Lo",
-]
-
-HELP = {
-    "ρs/ρf": "Relative density (saltwater/freshwater).",
-    "K/Ko": "Relative hydraulic conductivity.",
-    "Qi/(Ko·Lo²)": "Relative recharge rate.",
-    "i": "Hydraulic gradient (dimensionless).",
-    "Xi/Lo": "Recharge well distance (relative).",
-    "Yi/Lo": "Recharge well depth (relative).",
-    "Xb/Lo": "Barrier wall distance (relative).",
-    "Db/Lo": "Barrier wall depth (relative).",
+FEATURE_KEYS = ['X1','X2','X3','X4','X5','X6','X7','X8']  # must match model training order
+LABELS = {
+    'X1': "ρs/ρf   (Relative density)",
+    'X2': "K/Ko    (Relative hydraulic conductivity)",
+    'X3': "Qi/(Ko·Lo²)  (Relative recharge rate)",
+    'X4': "i       (Hydraulic gradient)",
+    'X5': "Xi/Lo   (Relative well distance)",
+    'X6': "Yi/Lo   (Relative well depth)",
+    'X7': "Xb/Lo   (Relative barrier wall distance)",
+    'X8': "Db/Lo   (Relative barrier wall depth)",
 }
 
-DEFAULTS = {
-    "ρs/ρf": 1.025,
-    "K/Ko": 1.000,
-    "Qi/(Ko·Lo²)": 0.0010,
-    "i": 0.0120,
-    "Xi/Lo": 1.000,
-    "Yi/Lo": 0.417,
-    "Xb/Lo": 0.313,
-    "Db/Lo": 0.323,
-}
-
-# Ranges for SHAP uniform background (adjust to your dataset if desired)
+# Bounds (sane defaults; adjust to your dataset if known)
 FEATURE_RANGES = {
-    "ρs/ρf":       (0.995, 1.035, DEFAULTS["ρs/ρf"]),
-    "K/Ko":        (0.30,  2.50,  DEFAULTS["K/Ko"]),
-    "Qi/(Ko·Lo²)": (1e-5,  5e-3,  DEFAULTS["Qi/(Ko·Lo²)"]),
-    "i":           (1e-3,  0.05,  DEFAULTS["i"]),
-    "Xi/Lo":       (0.10,  3.00,  DEFAULTS["Xi/Lo"]),
-    "Yi/Lo":       (0.05,  1.00,  DEFAULTS["Yi/Lo"]),
-    "Xb/Lo":       (0.05,  2.00,  DEFAULTS["Xb/Lo"]),
-    "Db/Lo":       (0.05,  1.00,  DEFAULTS["Db/Lo"]),
+    'X1': (1.000, 1.100, 1.025),  # seawater/freshwater density ratio ~ 1.02–1.03 typically
+    'X2': (0.10,  10.00, 1.00),
+    'X3': (0.000000, 1.000000, 0.050000),
+    'X4': (0.000, 0.500, 0.010),
+    'X5': (0.000, 5.000, 1.000),
+    'X6': (0.000, 1.000, 0.500),
+    'X7': (0.000, 5.000, 1.000),
+    'X8': (0.000, 1.000, 0.500),
 }
 
-NUM_SPEC = {
-    "ρs/ρf":       dict(step=1e-4, fmt="%.6f"),
-    "K/Ko":        dict(step=1e-4, fmt="%.6f"),
-    "Qi/(Ko·Lo²)": dict(step=1e-5, fmt="%.6f"),
-    "i":           dict(step=1e-5, fmt="%.6f"),
-    "Xi/Lo":       dict(step=1e-3, fmt="%.6f"),
-    "Yi/Lo":       dict(step=1e-3, fmt="%.6f"),
-    "Xb/Lo":       dict(step=1e-3, fmt="%.6f"),
-    "Db/Lo":       dict(step=1e-3, fmt="%.6f"),
+# Per-feature numeric input resolution/format
+SLIDER_SPEC = {
+    'X1': dict(step=1e-4,  fmt="%.6f"),
+    'X2': dict(step=1e-3,  fmt="%.3f"),
+    'X3': dict(step=1e-6,  fmt="%.6f"),
+    'X4': dict(step=1e-3,  fmt="%.3f"),
+    'X5': dict(step=1e-2,  fmt="%.2f"),
+    'X6': dict(step=1e-3,  fmt="%.3f"),
+    'X7': dict(step=1e-2,  fmt="%.2f"),
+    'X8': dict(step=1e-3,  fmt="%.3f"),
 }
 
+# Presets (feel free to adjust)
 PRESETS = {
     "— choose a preset —": None,
-    "Baseline (defaults)": DEFAULTS,
-    "Higher recharge": {**DEFAULTS, "Qi/(Ko·Lo²)": 0.0015},
-    "Deeper barrier":   {**DEFAULTS, "Db/Lo": 0.45},
-    "Farther barrier":  {**DEFAULTS, "Xb/Lo": 0.60},
+    "Baseline":          [1.025, 1.00, 0.050000, 0.010, 1.00, 0.50, 1.00, 0.50],
+    "High Recharge":     [1.025, 1.00, 0.200000, 0.010, 1.00, 0.50, 1.00, 0.50],
+    "High Gradient":     [1.025, 1.00, 0.050000, 0.100, 1.00, 0.50, 1.00, 0.50],
+    "Deep Barrier":      [1.025, 1.00, 0.050000, 0.010, 1.00, 0.50, 1.00, 0.90],
 }
 
-# ==============================
+# ------------------------------
 # Helpers
-# ==============================
-def _force_catboost_cpu_single_thread(model_obj):
-    """Best-effort: force CatBoost to CPU, 1 thread (safe no-op for other models)."""
+# ------------------------------
+def _lock_model_deterministic(model):
+    """Try to force single-threaded CPU prediction and fetch expected feature names."""
+    expected = None
+    # XGBoost style
     try:
-        import catboost
-        if isinstance(model_obj, (catboost.CatBoostRegressor, catboost.CatBoostClassifier)):
-            try:
-                model_obj.set_params(task_type="CPU", thread_count=1, random_seed=42)
-            except Exception:
-                pass
+        model.get_booster().set_param({"predictor": "cpu_predictor", "nthread": 1})
     except Exception:
         pass
     try:
-        if hasattr(model_obj, "set_params"):
-            model_obj.set_params(thread_count=1)
+        model.set_params(n_jobs=1, nthread=1, thread_count=1)
     except Exception:
-        pass
-    return model_obj
-
-def _get_model_feature_names(model_obj):
-    """Try to read feature names from model (pandas-trained)."""
-    names = None
+        # CatBoost native has set_params too; if not, ignore.
+        try:
+            if hasattr(model, "set_params"):
+                model.set_params(thread_count=1)
+        except Exception:
+            pass
+    # Feature names detection (works for many sklearn-compatible models)
     for attr in ("feature_names_in_", "feature_names_", "feature_names"):
-        if hasattr(model_obj, attr):
+        if hasattr(model, attr):
             try:
-                candidates = list(getattr(model_obj, attr))
-                if candidates and set(candidates) == set(FEATURE_KEYS):
-                    names = candidates
-                    break
+                names = getattr(model, attr)
+                expected = list(map(str, names))
+                break
             except Exception:
-                pass
-    return names
+                expected = None
+    return expected
 
-def _ordered_df(values: dict, expected_names: list | None):
-    """Build 1-row DataFrame in model's expected order when available."""
+def _ordered_df(values: dict, expected_names):
+    """Build 1-row DataFrame with correct column order."""
     if expected_names and set(map(str, expected_names)) == set(FEATURE_KEYS):
         cols = list(map(str, expected_names))
     else:
@@ -294,16 +262,17 @@ def json_download_bytes(obj):
     return buf
 
 def sample_background_df(ranges: dict, n: int = 256, seed: int | None = None) -> pd.DataFrame:
+    """Uniformly sample within slider ranges for background SHAP."""
     rng = np.random.default_rng(None if seed is None else int(seed))
     data = {}
     for k in FEATURE_KEYS:
         lo, hi, _ = ranges[k]
-        data[k] = rng.uniform(float(lo), float(hi), size=n)
+        data[k] = rng.uniform(lo, hi, size=n)
     return pd.DataFrame(data).astype(np.float32)
 
 def find_local_image() -> Image.Image | None:
     for p in IMAGE_CANDIDATES:
-        if p.exists():
+        if Path(p).exists():
             try:
                 return Image.open(p)
             except Exception:
@@ -314,51 +283,50 @@ def ranges_key_tuple() -> tuple:
     """Hashable key for caching background SHAP when ranges change."""
     return tuple((k, tuple(map(float, FEATURE_RANGES[k]))) for k in FEATURE_KEYS)
 
-def clip_to_bounds(vals: dict) -> dict:
-    out = {}
-    for k, v in vals.items():
+def clip_to_bounds(vals: list[float]) -> list[float]:
+    out = []
+    for v, k in zip(vals, FEATURE_KEYS):
         lo, hi, _ = FEATURE_RANGES[k]
-        out[k] = min(max(float(v), float(lo)), float(hi))
+        out.append(min(max(float(v), lo), hi))
     return out
 
-# ==============================
-# Cached resources (AUTO-LOAD MODEL)
-# ==============================
-def _assert_model_exists() -> Path:
-    if MODEL_PATH.exists():
-        return MODEL_PATH
-    raise FileNotFoundError(
-        f"Model not found at '{MODEL_PATH}'. Place your CatBoost .joblib at exactly this path and name "
-        f"(models/CGB.joblib) inside the repo."
-    )
+# ------------------------------
+# Caching (no unhashable params!)
+# ------------------------------
+@st.cache_resource(show_spinner=False)
+def load_model_and_expected():
+    m = joblib.load(MODEL_PATH)
+    expected = _lock_model_deterministic(m)
+    return m, expected
 
-@st.cache_resource(show_spinner=True)
-def load_model_and_explainer():
-    """Auto-load CatBoost model from models/CGB.joblib and prepare SHAP explainer."""
-    model_path = _assert_model_exists()
-    model = joblib.load(model_path)
-    model = _force_catboost_cpu_single_thread(model)
-    expected = _get_model_feature_names(model)
-    explainer = shap.Explainer(model)
-    return model, expected, explainer, str(model_path)
+@st.cache_resource(show_spinner=False)
+def get_explainer():
+    model, _ = load_model_and_expected()
+    # Generic Explainer auto-selects TreeExplainer if supported (CatBoost/XGB/LightGBM)
+    return shap.Explainer(model)
 
 @st.cache_data(show_spinner=False)
-def shap_background_values_uniform(n: int, rk: tuple, seed: int | None, expected_names):
-    model, _, explainer, _ = load_model_and_explainer()
+def shap_background_values_uniform(n: int, rk: tuple, seed: int | None):
+    """Cached global SHAP on synthetic (uniform) background."""
+    model, expected = load_model_and_expected()
+    explainer = get_explainer()
     df_bg = sample_background_df(FEATURE_RANGES, n, seed)
-    X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names)
+    # Align to model's column order
+    X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected)
     X_bg = df_bg[X_bg.columns]
     sv = explainer(X_bg)
     return sv, X_bg
 
 @st.cache_data(show_spinner=False)
-def shap_background_values_dataset(file_bytes: bytes, n: int, seed: int | None, expected_names):
-    model, _, explainer, _ = load_model_and_explainer()
+def shap_background_values_dataset(file_bytes: bytes, n: int, seed: int | None):
+    """Cached global SHAP on dataset background (uploaded CSV)."""
+    model, expected = load_model_and_expected()
+    explainer = get_explainer()
     df = pd.read_csv(BytesIO(file_bytes))
     if not set(FEATURE_KEYS).issubset(df.columns):
         missing = [c for c in FEATURE_KEYS if c not in df.columns]
         raise ValueError(f"Dataset missing columns: {missing}")
-    ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
+    ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected).columns
     if len(df) > n:
         df = df.sample(n=n, random_state=None if seed is None else int(seed))
     X_bg = df[ordered_cols].astype(np.float32)
@@ -366,47 +334,41 @@ def shap_background_values_dataset(file_bytes: bytes, n: int, seed: int | None, 
     return sv, X_bg
 
 def predict_one(values_dict):
-    model, expected, _, _ = load_model_and_explainer()
+    model, expected = load_model_and_expected()
+    try:
+        model.get_booster().set_param({"predictor": "cpu_predictor", "nthread": 1})
+    except Exception:
+        pass
+    try:
+        model.set_params(n_jobs=1, nthread=1, thread_count=1)
+    except Exception:
+        pass
     X = _ordered_df(values_dict, expected)
-    y = model.predict(X.values)  # CatBoost accepts ndarray
+    y = model.predict(X)
+    # Many libs return shape (1,) or [[y]]
     return float(np.ravel(y)[0])
 
-# ==============================
+# ------------------------------
 # Session state
-# ==============================
+# ------------------------------
 if "last_inputs" not in st.session_state:
     st.session_state.last_inputs = None
 if "history" not in st.session_state:
-    st.session_state.history = []
+    st.session_state.history = []  # list of dicts, each with time + Xs + pred
 if "current_pred" not in st.session_state:
     st.session_state.current_pred = None
 if "current_inputs" not in st.session_state:
-    st.session_state.current_inputs = {k: DEFAULTS[k] for k in FEATURE_KEYS}
+    st.session_state.current_inputs = {k: FEATURE_RANGES[k][2] for k in FEATURE_KEYS}
 if "sketch_bytes" not in st.session_state:
     st.session_state.sketch_bytes = None
 if "bg_file_bytes" not in st.session_state:
     st.session_state.bg_file_bytes = None
 
-# ==============================
-# Header (title + model path)
-# ==============================
-try:
-    _, _, _, _model_path = load_model_and_explainer()
-    model_source_html = f"Model source: <code>{_model_path}</code>"
-except Exception as _e:
-    model_source_html = f"<span style='color:#B00020;'>Model not loaded: {_e}</span>"
-
-st.markdown(
-    f"""
-    <div style="font-size:26px; font-weight:800; line-height:1.25; margin-bottom:.25rem;">
-      {ARTICLE_TITLE}
-    </div>
-    <div class="muted" style="margin-bottom:.75rem;">
-      {model_source_html}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+# ------------------------------
+# Header
+# ------------------------------
+st.title("Machine Learning-Based Modeling of Artificial Recharge and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers")
+st.caption("For users, technicians, water resources engineers, and hydrogeologists – quick, reliable, and explainable.")
 
 # Tabs
 tab_predict, tab_explain, tab_batch, tab_hist, tab_article = st.tabs(
@@ -414,11 +376,12 @@ tab_predict, tab_explain, tab_batch, tab_hist, tab_article = st.tabs(
 )
 
 # ==============================
-# Predict tab
+# PREDICT TAB
 # ==============================
 with tab_predict:
     col_left, col_right = st.columns([3, 2], gap="large")
 
+    # LEFT: prediction + inputs
     with col_left:
         st.markdown("#### Prediction")
         big = "—" if st.session_state.current_pred is None else f"{st.session_state.current_pred:.6f}"
@@ -429,48 +392,58 @@ with tab_predict:
         )
 
         st.markdown("#### Input Parameters (Dimensionless)")
-
+        # Preset
         preset = st.selectbox("Preset", list(PRESETS.keys()), index=0)
         if PRESETS.get(preset):
-            st.session_state.current_inputs = PRESETS[preset].copy()
+            vals = clip_to_bounds(PRESETS[preset])
+            st.session_state.current_inputs = {k: float(v) for k, v in zip(FEATURE_KEYS, vals)}
 
+        # Number inputs (4 per row)
         ordered_keys = FEATURE_KEYS[:]
         for i in range(0, len(ordered_keys), 4):
             cols = st.columns(4)
             for j, k in enumerate(ordered_keys[i:i+4]):
-                spec = NUM_SPEC[k]
-                default_val = float(st.session_state.current_inputs.get(k, DEFAULTS[k]))
+                lo, hi, df = FEATURE_RANGES[k]
+                spec = SLIDER_SPEC[k]
+                default_val = float(st.session_state.current_inputs.get(k, df))
+                default_val = float(min(max(default_val, float(lo)), float(hi)))
                 with cols[j]:
                     st.session_state.current_inputs[k] = st.number_input(
-                        k, value=default_val, step=float(spec["step"]),
-                        format=spec["fmt"], help=HELP.get(k, "")
+                        LABELS[k],
+                        min_value=float(lo),
+                        max_value=float(hi),
+                        value=default_val,
+                        step=float(spec["step"]),
+                        format=spec["fmt"],
                     )
 
-        st.caption("Tip: Save/Load your inputs with JSON; use Recall to restore previous run.")
-
+        # Bottom row buttons
         c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
         with c1:
             if st.button("Predict", use_container_width=True, type="primary"):
                 try:
-                    vals = clip_to_bounds(st.session_state.current_inputs)
-                    y = predict_one(vals)
+                    values = {k: float(st.session_state.current_inputs[k]) for k in FEATURE_RANGES.keys()}
+                    y = predict_one(values)
                     st.session_state.current_pred = y
-                    st.session_state.last_inputs = st.session_state.current_inputs.copy()
-                    rec = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **vals, "Prediction": round(y, 6)}
+                    st.session_state.last_inputs = [values[k] for k in FEATURE_KEYS]
+                    rec = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **values, "Prediction": round(float(y), 6)}
                     st.session_state.history.append(rec)
                     st.success("Prediction complete.")
+                except FileNotFoundError:
+                    st.error(f"Model not found at `{MODEL_PATH}`. Adjust MODEL_PATH.")
                 except Exception as e:
                     st.error(f"Prediction error: {e}")
         with c2:
             if st.button("Clear", use_container_width=True):
                 st.session_state.current_pred = None
-                st.session_state.current_inputs = {k: DEFAULTS[k] for k in FEATURE_KEYS}
+                st.session_state.current_inputs = {k: FEATURE_RANGES[k][2] for k in FEATURE_KEYS}
                 st.info("Cleared.")
         with c3:
             disabled = st.session_state.last_inputs is None
             if st.button("Recall Last", use_container_width=True, disabled=disabled):
                 if st.session_state.last_inputs is not None:
-                    st.session_state.current_inputs = st.session_state.last_inputs.copy()
+                    for k, v in zip(FEATURE_KEYS, st.session_state.last_inputs):
+                        st.session_state.current_inputs[k] = float(v)
                     st.success("Recalled last inputs.")
         with c4:
             buf = json_download_bytes(st.session_state.current_inputs)
@@ -488,6 +461,7 @@ with tab_predict:
                 except Exception as e:
                     st.error(f"Invalid JSON: {e}")
 
+    # RIGHT: reference sketch (with upload fallback)
     with col_right:
         st.markdown("#### Reference Sketch")
         up = st.file_uploader("Upload sketch (PNG/JPG)", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
@@ -505,35 +479,35 @@ with tab_predict:
             img = find_local_image()
 
         if img is None:
-            st.info("No image found. Add one at `assets/sketch22.png` / `assets/sketch.png` in the repo or upload above.")
+            st.info("No image found. Add one at `assets/sketch.png` in the repo or upload above.")
         else:
             st.image(img, use_container_width=True)
 
 # ==============================
-# Explain tab (SHAP)
+# EXPLAIN TAB (SHAP)
 # ==============================
 with tab_explain:
     st.markdown("### Explain (SHAP)")
-    try:
-        model, expected_names, explainer, _ = load_model_and_explainer()
-        bg_src = st.radio("Background source for global SHAP:",
-                          ["Uniform (use slider bounds)", "Dataset (upload CSV)"],
-                          horizontal=True)
-        n_bg = st.slider("Background sample size", 100, 2000, 256, 50,
-                         help="Larger = smoother but slower. 256–512 is good for 8 features.")
-        seed = st.number_input("Random seed (optional)", min_value=0, max_value=10_000, value=42, step=1)
 
+    bg_src = st.radio("Background source for global SHAP:",
+                      ["Uniform (use slider bounds)", "Dataset (upload CSV)"],
+                      horizontal=True)
+    n_bg = st.slider("Background sample size", 100, 2000, 256, 50,
+                     help="Larger = smoother but slower. 256–512 is good for 8 features.")
+    seed = st.number_input("Random seed (optional)", min_value=0, max_value=10_000, value=42, step=1)
+
+    try:
         if bg_src.startswith("Uniform"):
-            sv_bg, X_bg = shap_background_values_uniform(n=n_bg, rk=ranges_key_tuple(),
-                                                         seed=int(seed), expected_names=expected_names)
+            sv_bg, X_bg = shap_background_values_uniform(n=n_bg, rk=ranges_key_tuple(), seed=int(seed))
         else:
             up_bg = st.file_uploader("Upload CSV for SHAP background", type=["csv"], key="bg_csv")
             if up_bg is None:
-                st.info("Upload a CSV with the 8 feature columns to compute dataset-based SHAP.")
+                st.info("Upload a CSV with columns X1..X8 to compute dataset-based SHAP.")
                 st.stop()
-            sv_bg, X_bg = shap_background_values_dataset(up_bg.read(), n=n_bg,
-                                                         seed=int(seed), expected_names=expected_names)
+            st.session_state.bg_file_bytes = up_bg.read()
+            sv_bg, X_bg = shap_background_values_dataset(st.session_state.bg_file_bytes, n=n_bg, seed=int(seed))
 
+        # Global: bar + beeswarm
         colA, colB = st.columns(2)
         with colA:
             st.write("**Mean absolute SHAP (bar)**")
@@ -546,6 +520,7 @@ with tab_explain:
             shap.summary_plot(sv_bg.values, X_bg, show=False)
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
 
+        # Dependence plots (top features)
         mean_abs = np.mean(np.abs(sv_bg.values), axis=0)
         ordered_cols = list(X_bg.columns)
         order_idx = np.argsort(-mean_abs)
@@ -559,8 +534,14 @@ with tab_explain:
 
         try:
             fig, ax = plt.subplots(figsize=(7, 4))
-            shap.dependence_plot(dep1, sv_bg.values, X_bg,
-                                 interaction_index=interaction, show=False, ax=ax)
+            shap.dependence_plot(
+                dep1,
+                sv_bg.values,
+                X_bg,
+                interaction_index=interaction,
+                show=False,
+                ax=ax
+            )
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
             plt.close(fig)
         except Exception:
@@ -572,13 +553,17 @@ with tab_explain:
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
             plt.close(fig)
 
+        # Local SHAP for current inputs
         with st.expander("Local explanation for current inputs", expanded=True):
             if st.session_state.current_pred is None:
                 st.info("Make a prediction first in the Predict tab to see the local explanation.")
             else:
                 values = {k: float(st.session_state.current_inputs[k]) for k in FEATURE_KEYS}
-                X_one = _ordered_df(values, expected_names)
+                model, expected = load_model_and_expected()
+                explainer = get_explainer()
+                X_one = _ordered_df(values, expected)
                 sv_one = explainer(X_one)
+
                 st.write("**Waterfall (feature contributions)**")
                 try:
                     fig = plt.figure(figsize=(7, 5))
@@ -588,43 +573,52 @@ with tab_explain:
                     fig = plt.figure(figsize=(7, 4))
                     shap.plots.bar(sv_one[0], show=False, max_display=8)
                     st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+
+    except FileNotFoundError:
+        st.error(f"Model not found at `{MODEL_PATH}`. Adjust MODEL_PATH or upload the model.")
     except Exception as e:
-        st.info("Load error or SHAP unavailable:")
-        st.error(e)
+        st.error(f"SHAP explain error: {e}")
 
 # ==============================
-# Batch tab
+# BATCH TAB
 # ==============================
 with tab_batch:
     st.markdown("### Batch Predictions (CSV → CSV)")
-    st.write("Upload a CSV with columns **exactly**:")
-    st.code(", ".join(FEATURE_KEYS), language="text")
-
+    st.write("Upload a CSV with columns **X1..X8** in any order; the app will align them.")
     up = st.file_uploader("Upload CSV", type=["csv"])
     if up:
         try:
-            model, expected_names, _, _ = load_model_and_explainer()
             df = pd.read_csv(up)
-            missing = [c for c in FEATURE_KEYS if c not in df.columns]
-            if missing:
+            model, expected = load_model_and_expected()
+            if not set(FEATURE_KEYS).issubset(df.columns):
+                missing = [c for c in FEATURE_KEYS if c not in df.columns]
                 st.error(f"CSV missing columns: {missing}")
             else:
-                ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
-                X = df[ordered_cols].astype(np.float32).values
+                ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected).columns
+                X = df[ordered_cols].astype(np.float32)
+                try:
+                    model.get_booster().set_param({"predictor":"cpu_predictor","nthread":1})
+                except Exception:
+                    pass
+                try:
+                    model.set_params(n_jobs=1, nthread=1, thread_count=1)
+                except Exception:
+                    pass
                 preds = model.predict(X)
-                preds = np.ravel(preds).astype(float)
                 out = df.copy()
-                out["Pred_L_over_Lo"] = preds
+                out["Pred_L_over_Lo"] = np.ravel(preds)
                 st.success("Batch predictions complete.")
                 st.dataframe(out.head(20), use_container_width=True)
-                st.download_button("Download predictions CSV",
-                                   data=out.to_csv(index=False).encode("utf-8"),
+                csv_bytes = out.to_csv(index=False).encode("utf-8")
+                st.download_button("Download predictions CSV", data=csv_bytes,
                                    file_name="predictions.csv", mime="text/csv")
+        except FileNotFoundError:
+            st.error(f"Model not found at `{MODEL_PATH}`. Adjust MODEL_PATH or upload the model.")
         except Exception as e:
             st.error(f"Batch error: {e}")
 
 # ==============================
-# History tab
+# HISTORY TAB
 # ==============================
 with tab_hist:
     st.markdown("### Session History")
@@ -641,46 +635,37 @@ with tab_hist:
             st.rerun()
 
 # ==============================
-# Article Info tab
+# ARTICLE INFO TAB
 # ==============================
 with tab_article:
     st.markdown("### Article & Authors")
     st.markdown(
-        f"""
-        <div style="font-size:24px; font-weight:800; line-height:1.25;">
-        {ARTICLE_TITLE}
+        """
+        <div style="font-size:28px; font-weight:800; line-height:1.25;">
+        Machine Learning-Based Modeling of Artificial Recharge and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"""
-        <div style="font-size:18px; font-weight:700; margin-top:0.5rem;">
-        {ARTICLE_AUTHORS_HTML}
+        """
+        <div style="font-size:20px; font-weight:700; margin-top:0.5rem;">
+        Developers: Mohamed Kamel Elshaarawy & Asaad Mater Armanuos
         </div>
         """, unsafe_allow_html=True,
     )
     st.markdown(
-        f"""
-        <div style="font-size:16px; margin-top:0.5rem;">
-        {ARTICLE_AFFILS_HTML}
+        """
+        <div class="muted" style="font-size:16px; margin-top:.5rem;">
+        This app provides a fast, interpretable predictor for the relative seawater intrusion (SWI) wedge length (L/Lo)
+        under artificial recharge and cutoff wall configurations.
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"""
-        <div style="font-size:16px; font-style:italic; margin-top:0.6rem;">
-        {ARTICLE_JOURNAL}
-        </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
 
     citation = (
-        "Elshaarawy, M.K., & Armanuos, A.M. (n.d.). "
-        "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for Saltwater Intrusion Control "
-        "with Explainable ML and GUI Deployment. Catena."
+        "Elshaarawy, M.K., & Armanuos, A.M. (n.d.). Machine Learning-Based Modeling of Artificial Recharge "
+        "and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers. [Software]."
     )
     st.download_button("Download Citation (.txt)", data=citation.encode("utf-8"),
                        file_name="citation.txt", mime="text/plain")
