@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------
 # SWI Wedge Length Ratio (L/Lo) — Smart Predictor (CatBoost)
-#   - Auto-loads model from repo: models/CGB.joblib (no manual action)
-#   - If not found, searches the repo for CGB.joblib
+#   - Auto-loads model from: models/CGB.joblib (exact path & name)
 #   - Clean card-style GUI + Explain (SHAP) + Batch + History + Article Info
-#   - Paper title as header (reduced font) + updated authors/affiliations
+#   - Paper title header (reduced font) + updated authors/affiliations
 #   - Deterministic CPU inference where possible
 # ------------------------------------------------------------
 
@@ -84,12 +83,6 @@ st.markdown(
         color: var(--ui-text) !important;
         border: 1px solid var(--ui-border) !important;
         border-radius: 10px !important;
-      }
-      .stSelectbox div[role="combobox"] {
-        background: var(--ui-card);
-        border: 1px solid var(--ui-border);
-        border-radius: 10px;
-        color: var(--ui-text);
       }
 
       /* Buttons */
@@ -177,11 +170,7 @@ ARTICLE_JOURNAL = "Catena"
 # ==============================
 # Config / constants
 # ==============================
-MODEL_NAME = "CGB.joblib"
-MODEL_CANDIDATES = [
-    Path("models") / MODEL_NAME,  # primary (repo)
-    Path(MODEL_NAME),             # root fallback
-]
+MODEL_PATH = Path("models/CGB.joblib")  # exact location & name
 IMAGE_CANDIDATES = [
     Path("assets/sketch22.png"),
     Path("assets/sketch.png"),
@@ -191,14 +180,14 @@ IMAGE_CANDIDATES = [
 
 # Feature names (MUST match training order)
 FEATURE_KEYS = [
-    "ρs/ρf",       # X1  Relative density
-    "K/Ko",        # X2  Relative hydraulic conductivity
-    "Qi/(Ko·Lo²)", # X3  Relative recharge rate
-    "i",           # X4  Hydraulic gradient
-    "Xi/Lo",       # X5  Relative well distance
-    "Yi/Lo",       # X6  Relative well depth
-    "Xb/Lo",       # X7  Relative barrier wall distance
-    "Db/Lo",       # X8  Relative barrier wall depth
+    "ρs/ρf",
+    "K/Ko",
+    "Qi/(Ko·Lo²)",
+    "i",
+    "Xi/Lo",
+    "Yi/Lo",
+    "Xb/Lo",
+    "Db/Lo",
 ]
 
 HELP = {
@@ -223,7 +212,7 @@ DEFAULTS = {
     "Db/Lo": 0.323,
 }
 
-# Ranges for SHAP uniform background (edit if you have dataset mins/maxes)
+# Ranges for SHAP uniform background (adjust to your dataset if desired)
 FEATURE_RANGES = {
     "ρs/ρf":       (0.995, 1.035, DEFAULTS["ρs/ρf"]),
     "K/Ko":        (0.30,  2.50,  DEFAULTS["K/Ko"]),
@@ -332,24 +321,21 @@ def clip_to_bounds(vals: dict) -> dict:
         out[k] = min(max(float(v), float(lo)), float(hi))
     return out
 
-def _discover_model_path() -> Path:
-    """Return the first existing path to CGB.joblib or raise FileNotFoundError."""
-    for p in MODEL_CANDIDATES:
-        if p.exists():
-            return p
-    # Last resort: search the repo tree
-    for p in Path(".").rglob(MODEL_NAME):
-        return p
-    raise FileNotFoundError(f"Could not find {MODEL_NAME}. Expected at: "
-                            + ", ".join(str(p) for p in MODEL_CANDIDATES))
+# ==============================
+# Cached resources (AUTO-LOAD MODEL)
+# ==============================
+def _assert_model_exists() -> Path:
+    if MODEL_PATH.exists():
+        return MODEL_PATH
+    raise FileNotFoundError(
+        f"Model not found at '{MODEL_PATH}'. Place your CatBoost .joblib at exactly this path and name "
+        f"(models/CGB.joblib) inside the repo."
+    )
 
-# ==============================
-# Cached resources
-# ==============================
 @st.cache_resource(show_spinner=True)
 def load_model_and_explainer():
-    """Auto-load CatBoost model from repo and prepare SHAP explainer."""
-    model_path = _discover_model_path()
+    """Auto-load CatBoost model from models/CGB.joblib and prepare SHAP explainer."""
+    model_path = _assert_model_exists()
     model = joblib.load(model_path)
     model = _force_catboost_cpu_single_thread(model)
     expected = _get_model_feature_names(model)
@@ -358,10 +344,8 @@ def load_model_and_explainer():
 
 @st.cache_data(show_spinner=False)
 def shap_background_values_uniform(n: int, rk: tuple, seed: int | None, expected_names):
-    """Global SHAP on synthetic (uniform) background."""
     model, _, explainer, _ = load_model_and_explainer()
     df_bg = sample_background_df(FEATURE_RANGES, n, seed)
-    # Align to model's column order
     X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names)
     X_bg = df_bg[X_bg.columns]
     sv = explainer(X_bg)
@@ -369,13 +353,11 @@ def shap_background_values_uniform(n: int, rk: tuple, seed: int | None, expected
 
 @st.cache_data(show_spinner=False)
 def shap_background_values_dataset(file_bytes: bytes, n: int, seed: int | None, expected_names):
-    """Global SHAP on dataset background (uploaded CSV)."""
     model, _, explainer, _ = load_model_and_explainer()
     df = pd.read_csv(BytesIO(file_bytes))
     if not set(FEATURE_KEYS).issubset(df.columns):
         missing = [c for c in FEATURE_KEYS if c not in df.columns]
         raise ValueError(f"Dataset missing columns: {missing}")
-    # Align & sample
     ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
     if len(df) > n:
         df = df.sample(n=n, random_state=None if seed is None else int(seed))
@@ -395,7 +377,7 @@ def predict_one(values_dict):
 if "last_inputs" not in st.session_state:
     st.session_state.last_inputs = None
 if "history" not in st.session_state:
-    st.session_state.history = []  # list of dicts, each with time + Xs + pred
+    st.session_state.history = []
 if "current_pred" not in st.session_state:
     st.session_state.current_pred = None
 if "current_inputs" not in st.session_state:
@@ -406,9 +388,8 @@ if "bg_file_bytes" not in st.session_state:
     st.session_state.bg_file_bytes = None
 
 # ==============================
-# Header (paper title, smaller font)
+# Header (title + model path)
 # ==============================
-# Show model source path (or error) right under the title.
 try:
     _, _, _, _model_path = load_model_and_explainer()
     model_source_html = f"Model source: <code>{_model_path}</code>"
@@ -433,12 +414,11 @@ tab_predict, tab_explain, tab_batch, tab_hist, tab_article = st.tabs(
 )
 
 # ==============================
-# PREDICT TAB
+# Predict tab
 # ==============================
 with tab_predict:
     col_left, col_right = st.columns([3, 2], gap="large")
 
-    # LEFT: prediction + inputs
     with col_left:
         st.markdown("#### Prediction")
         big = "—" if st.session_state.current_pred is None else f"{st.session_state.current_pred:.6f}"
@@ -450,12 +430,10 @@ with tab_predict:
 
         st.markdown("#### Input Parameters (Dimensionless)")
 
-        # Preset
         preset = st.selectbox("Preset", list(PRESETS.keys()), index=0)
         if PRESETS.get(preset):
             st.session_state.current_inputs = PRESETS[preset].copy()
 
-        # Number inputs (4 per row)
         ordered_keys = FEATURE_KEYS[:]
         for i in range(0, len(ordered_keys), 4):
             cols = st.columns(4)
@@ -468,9 +446,8 @@ with tab_predict:
                         format=spec["fmt"], help=HELP.get(k, "")
                     )
 
-        st.caption("Tip: Use **Save Inputs (JSON)** to download a template; **Load Inputs** to restore.")
+        st.caption("Tip: Save/Load your inputs with JSON; use Recall to restore previous run.")
 
-        # Bottom row buttons
         c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
         with c1:
             if st.button("Predict", use_container_width=True, type="primary"):
@@ -511,7 +488,6 @@ with tab_predict:
                 except Exception as e:
                     st.error(f"Invalid JSON: {e}")
 
-    # RIGHT: reference sketch (with upload fallback)
     with col_right:
         st.markdown("#### Reference Sketch")
         up = st.file_uploader("Upload sketch (PNG/JPG)", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
@@ -534,12 +510,12 @@ with tab_predict:
             st.image(img, use_container_width=True)
 
 # ==============================
-# EXPLAIN TAB (SHAP)
+# Explain tab (SHAP)
 # ==============================
 with tab_explain:
     st.markdown("### Explain (SHAP)")
     try:
-        model, expected_names, _, _ = load_model_and_explainer()
+        model, expected_names, explainer, _ = load_model_and_explainer()
         bg_src = st.radio("Background source for global SHAP:",
                           ["Uniform (use slider bounds)", "Dataset (upload CSV)"],
                           horizontal=True)
@@ -558,7 +534,6 @@ with tab_explain:
             sv_bg, X_bg = shap_background_values_dataset(up_bg.read(), n=n_bg,
                                                          seed=int(seed), expected_names=expected_names)
 
-        # Global: bar + beeswarm
         colA, colB = st.columns(2)
         with colA:
             st.write("**Mean absolute SHAP (bar)**")
@@ -571,7 +546,6 @@ with tab_explain:
             shap.summary_plot(sv_bg.values, X_bg, show=False)
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
 
-        # Dependence plots
         mean_abs = np.mean(np.abs(sv_bg.values), axis=0)
         ordered_cols = list(X_bg.columns)
         order_idx = np.argsort(-mean_abs)
@@ -598,14 +572,12 @@ with tab_explain:
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
             plt.close(fig)
 
-        # Local SHAP for current inputs
         with st.expander("Local explanation for current inputs", expanded=True):
             if st.session_state.current_pred is None:
                 st.info("Make a prediction first in the Predict tab to see the local explanation.")
             else:
                 values = {k: float(st.session_state.current_inputs[k]) for k in FEATURE_KEYS}
                 X_one = _ordered_df(values, expected_names)
-                explainer = shap.Explainer(model)
                 sv_one = explainer(X_one)
                 st.write("**Waterfall (feature contributions)**")
                 try:
@@ -621,7 +593,7 @@ with tab_explain:
         st.error(e)
 
 # ==============================
-# BATCH TAB
+# Batch tab
 # ==============================
 with tab_batch:
     st.markdown("### Batch Predictions (CSV → CSV)")
@@ -652,7 +624,7 @@ with tab_batch:
             st.error(f"Batch error: {e}")
 
 # ==============================
-# HISTORY TAB
+# History tab
 # ==============================
 with tab_hist:
     st.markdown("### Session History")
@@ -669,7 +641,7 @@ with tab_hist:
             st.rerun()
 
 # ==============================
-# ARTICLE INFO TAB
+# Article Info tab
 # ==============================
 with tab_article:
     st.markdown("### Article & Authors")
@@ -693,7 +665,8 @@ with tab_article:
         <div style="font-size:16px; margin-top:0.5rem;">
         {ARTICLE_AFFILS_HTML}
         </div>
-        """, unsafe_allow_html=True,
+        """,
+        unsafe_allow_html=True,
     )
     st.markdown(
         f"""
