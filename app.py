@@ -8,6 +8,7 @@
 #   Predict, Explain (SHAP), Batch, History, Article Info
 # Deterministic CPU predictions; cached model; no unhashable-arg caching.
 
+import os
 import json
 from io import BytesIO
 from pathlib import Path
@@ -20,12 +21,15 @@ from PIL import Image
 import joblib
 import shap
 import matplotlib.pyplot as plt
+import requests  # for downloading the joblib from GitHub
 
 # ------------------------------
 # Page / theme config
 # ------------------------------
+PAGE_TITLE = "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for Saltwater Intrusion Control with Explainable ML and GUI Deployment"
+
 st.set_page_config(
-    page_title="Machine Learning-Based Modeling of Artificial Recharge and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers",
+    page_title=PAGE_TITLE,
     page_icon="🌊",
     layout="wide",
 )
@@ -93,10 +97,10 @@ st.markdown(
 
       /* Buttons */
       .stButton > button[kind="primary"] {
-        background: #ffffff !important;  /* White background for buttons */
-        color: #000000 !important;       /* Black text color */
-        border: 1px solid var(--ui-border) !important; /* Light border */
-        border-radius: 10px;             /* Rounded corners */
+        background: #ffffff !important;
+        color: #000000 !important;
+        border: 1px solid var(--ui-border) !important;
+        border-radius: 10px;
         padding: .6rem 1rem;
         font-weight: 800;
       }
@@ -110,9 +114,7 @@ st.markdown(
       }
 
       /* Tabs */
-      .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-      }
+      .stTabs [data-baseweb="tab-list"] { gap: 8px; }
       .stTabs [data-baseweb="tab"] {
         background: #ffffff;
         color: var(--ui-text);
@@ -149,28 +151,27 @@ st.markdown(
         color: var(--ui-text);
       }
 
-      .muted {
-        color: var(--ui-text-muted);
-        font-size: 0.95rem;
-      }
+      .muted { color: var(--ui-text-muted); font-size: 0.95rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ------------------------------
-# Config / constants (ADAPTED TO YOUR VARIABLES)
+# Config / constants
 # ------------------------------
-MODEL_PATH = "C:/Users/asus1/Desktop/CGB1.joblib"  # your CatBoost (or other) model file
+# Model source (GitHub raw) + local cache path
+MODEL_URL = "https://raw.githubusercontent.com/mkamel24/SWI6R/main/models/CGB.joblib"
+MODEL_LOCAL_PATH = Path("models/CGB.joblib")
+
 IMAGE_CANDIDATES = [
     Path("assets/sketch.png"),
     Path("assets/sketch22.png"),
     Path("sketch.png"),
     Path("sketch22.png"),
-    Path("C:/Users/asus1/Desktop/sketch.png"),
 ]
 
-FEATURE_KEYS = ['X1','X2','X3','X4','X5','X6','X7','X8']  # must match model training order
+FEATURE_KEYS = ['X1','X2','X3','X4','X5','X6','X7','X8']
 LABELS = {
     'X1': "ρs/ρf   (Relative density)",
     'X2': "K/Ko    (Relative hydraulic conductivity)",
@@ -182,9 +183,9 @@ LABELS = {
     'X8': "Db/Lo   (Relative barrier wall depth)",
 }
 
-# Bounds (sane defaults; adjust to your dataset if known)
+# Bounds (adjust to your dataset as needed)
 FEATURE_RANGES = {
-    'X1': (1.000, 1.100, 1.025),  # seawater/freshwater density ratio ~ 1.02–1.03 typically
+    'X1': (1.000, 1.100, 1.025),
     'X2': (0.10,  10.00, 1.00),
     'X3': (0.000000, 1.000000, 0.050000),
     'X4': (0.000, 0.500, 0.010),
@@ -194,7 +195,6 @@ FEATURE_RANGES = {
     'X8': (0.000, 1.000, 0.500),
 }
 
-# Per-feature numeric input resolution/format
 SLIDER_SPEC = {
     'X1': dict(step=1e-4,  fmt="%.6f"),
     'X2': dict(step=1e-3,  fmt="%.3f"),
@@ -206,7 +206,6 @@ SLIDER_SPEC = {
     'X8': dict(step=1e-3,  fmt="%.3f"),
 }
 
-# Presets (feel free to adjust)
 PRESETS = {
     "— choose a preset —": None,
     "Baseline":          [1.025, 1.00, 0.050000, 0.010, 1.00, 0.50, 1.00, 0.50],
@@ -218,10 +217,24 @@ PRESETS = {
 # ------------------------------
 # Helpers
 # ------------------------------
+def ensure_model_file() -> Path:
+    """Ensure the model is available locally; download from GitHub raw if missing."""
+    MODEL_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if MODEL_LOCAL_PATH.exists() and MODEL_LOCAL_PATH.stat().st_size > 0:
+        return MODEL_LOCAL_PATH
+
+    # Download from GitHub raw
+    try:
+        with requests.get(MODEL_URL, timeout=60) as r:
+            r.raise_for_status()
+            MODEL_LOCAL_PATH.write_bytes(r.content)
+        return MODEL_LOCAL_PATH
+    except Exception as e:
+        raise FileNotFoundError(f"Could not obtain model from {MODEL_URL}: {e}")
+
 def _lock_model_deterministic(model):
     """Try to force single-threaded CPU prediction and fetch expected feature names."""
     expected = None
-    # XGBoost style
     try:
         model.get_booster().set_param({"predictor": "cpu_predictor", "nthread": 1})
     except Exception:
@@ -229,13 +242,7 @@ def _lock_model_deterministic(model):
     try:
         model.set_params(n_jobs=1, nthread=1, thread_count=1)
     except Exception:
-        # CatBoost native has set_params too; if not, ignore.
-        try:
-            if hasattr(model, "set_params"):
-                model.set_params(thread_count=1)
-        except Exception:
-            pass
-    # Feature names detection (works for many sklearn-compatible models)
+        pass
     for attr in ("feature_names_in_", "feature_names_", "feature_names"):
         if hasattr(model, attr):
             try:
@@ -262,7 +269,6 @@ def json_download_bytes(obj):
     return buf
 
 def sample_background_df(ranges: dict, n: int = 256, seed: int | None = None) -> pd.DataFrame:
-    """Uniformly sample within slider ranges for background SHAP."""
     rng = np.random.default_rng(None if seed is None else int(seed))
     data = {}
     for k in FEATURE_KEYS:
@@ -280,7 +286,6 @@ def find_local_image() -> Image.Image | None:
     return None
 
 def ranges_key_tuple() -> tuple:
-    """Hashable key for caching background SHAP when ranges change."""
     return tuple((k, tuple(map(float, FEATURE_RANGES[k]))) for k in FEATURE_KEYS)
 
 def clip_to_bounds(vals: list[float]) -> list[float]:
@@ -291,27 +296,25 @@ def clip_to_bounds(vals: list[float]) -> list[float]:
     return out
 
 # ------------------------------
-# Caching (no unhashable params!)
+# Caching
 # ------------------------------
 @st.cache_resource(show_spinner=False)
 def load_model_and_expected():
-    m = joblib.load(MODEL_PATH)
+    path = ensure_model_file()
+    m = joblib.load(path)
     expected = _lock_model_deterministic(m)
     return m, expected
 
 @st.cache_resource(show_spinner=False)
 def get_explainer():
     model, _ = load_model_and_expected()
-    # Generic Explainer auto-selects TreeExplainer if supported (CatBoost/XGB/LightGBM)
     return shap.Explainer(model)
 
 @st.cache_data(show_spinner=False)
 def shap_background_values_uniform(n: int, rk: tuple, seed: int | None):
-    """Cached global SHAP on synthetic (uniform) background."""
     model, expected = load_model_and_expected()
     explainer = get_explainer()
     df_bg = sample_background_df(FEATURE_RANGES, n, seed)
-    # Align to model's column order
     X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected)
     X_bg = df_bg[X_bg.columns]
     sv = explainer(X_bg)
@@ -319,7 +322,6 @@ def shap_background_values_uniform(n: int, rk: tuple, seed: int | None):
 
 @st.cache_data(show_spinner=False)
 def shap_background_values_dataset(file_bytes: bytes, n: int, seed: int | None):
-    """Cached global SHAP on dataset background (uploaded CSV)."""
     model, expected = load_model_and_expected()
     explainer = get_explainer()
     df = pd.read_csv(BytesIO(file_bytes))
@@ -345,7 +347,6 @@ def predict_one(values_dict):
         pass
     X = _ordered_df(values_dict, expected)
     y = model.predict(X)
-    # Many libs return shape (1,) or [[y]]
     return float(np.ravel(y)[0])
 
 # ------------------------------
@@ -354,7 +355,7 @@ def predict_one(values_dict):
 if "last_inputs" not in st.session_state:
     st.session_state.last_inputs = None
 if "history" not in st.session_state:
-    st.session_state.history = []  # list of dicts, each with time + Xs + pred
+    st.session_state.history = []
 if "current_pred" not in st.session_state:
     st.session_state.current_pred = None
 if "current_inputs" not in st.session_state:
@@ -367,7 +368,7 @@ if "bg_file_bytes" not in st.session_state:
 # ------------------------------
 # Header
 # ------------------------------
-st.title("Machine Learning-Based Modeling of Artificial Recharge and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers")
+st.title(PAGE_TITLE)
 st.caption("For users, technicians, water resources engineers, and hydrogeologists – quick, reliable, and explainable.")
 
 # Tabs
@@ -392,6 +393,7 @@ with tab_predict:
         )
 
         st.markdown("#### Input Parameters (Dimensionless)")
+
         # Preset
         preset = st.selectbox("Preset", list(PRESETS.keys()), index=0)
         if PRESETS.get(preset):
@@ -429,8 +431,8 @@ with tab_predict:
                     rec = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **values, "Prediction": round(float(y), 6)}
                     st.session_state.history.append(rec)
                     st.success("Prediction complete.")
-                except FileNotFoundError:
-                    st.error(f"Model not found at `{MODEL_PATH}`. Adjust MODEL_PATH.")
+                except FileNotFoundError as e:
+                    st.error(str(e))
                 except Exception as e:
                     st.error(f"Prediction error: {e}")
         with c2:
@@ -507,7 +509,6 @@ with tab_explain:
             st.session_state.bg_file_bytes = up_bg.read()
             sv_bg, X_bg = shap_background_values_dataset(st.session_state.bg_file_bytes, n=n_bg, seed=int(seed))
 
-        # Global: bar + beeswarm
         colA, colB = st.columns(2)
         with colA:
             st.write("**Mean absolute SHAP (bar)**")
@@ -520,7 +521,6 @@ with tab_explain:
             shap.summary_plot(sv_bg.values, X_bg, show=False)
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
 
-        # Dependence plots (top features)
         mean_abs = np.mean(np.abs(sv_bg.values), axis=0)
         ordered_cols = list(X_bg.columns)
         order_idx = np.argsort(-mean_abs)
@@ -553,7 +553,6 @@ with tab_explain:
             st.pyplot(fig, clear_figure=True, bbox_inches="tight")
             plt.close(fig)
 
-        # Local SHAP for current inputs
         with st.expander("Local explanation for current inputs", expanded=True):
             if st.session_state.current_pred is None:
                 st.info("Make a prediction first in the Predict tab to see the local explanation.")
@@ -574,8 +573,8 @@ with tab_explain:
                     shap.plots.bar(sv_one[0], show=False, max_display=8)
                     st.pyplot(fig, clear_figure=True, bbox_inches="tight")
 
-    except FileNotFoundError:
-        st.error(f"Model not found at `{MODEL_PATH}`. Adjust MODEL_PATH or upload the model.")
+    except FileNotFoundError as e:
+        st.error(str(e))
     except Exception as e:
         st.error(f"SHAP explain error: {e}")
 
@@ -612,8 +611,8 @@ with tab_batch:
                 csv_bytes = out.to_csv(index=False).encode("utf-8")
                 st.download_button("Download predictions CSV", data=csv_bytes,
                                    file_name="predictions.csv", mime="text/csv")
-        except FileNotFoundError:
-            st.error(f"Model not found at `{MODEL_PATH}`. Adjust MODEL_PATH or upload the model.")
+        except FileNotFoundError as e:
+            st.error(str(e))
         except Exception as e:
             st.error(f"Batch error: {e}")
 
@@ -640,9 +639,9 @@ with tab_hist:
 with tab_article:
     st.markdown("### Article & Authors")
     st.markdown(
-        """
+        f"""
         <div style="font-size:28px; font-weight:800; line-height:1.25;">
-        Machine Learning-Based Modeling of Artificial Recharge and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers
+        {PAGE_TITLE}
         </div>
         """,
         unsafe_allow_html=True,
@@ -650,22 +649,31 @@ with tab_article:
     st.markdown(
         """
         <div style="font-size:20px; font-weight:700; margin-top:0.5rem;">
-        Developers: Mohamed Kamel Elshaarawy & Asaad Mater Armanuos
+        Mohamed Kamel Elshaarawy¹,* &amp; Asaad M. Armanuos²,*
+        </div>
+        """, unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div style="font-size:18px; margin-top:0.5rem;">
+        ¹ Civil Engineering Department, Faculty of Engineering, Horus University-Egypt, New Damietta 34517, Egypt; <a href="mailto:melshaarawy@horus.edu.eg">melshaarawy@horus.edu.eg</a> (M.K.E.)<br>
+        ² Irrigation and Hydraulics Engineering Department, Faculty of Engineering, Tanta University, Tanta 31733, Egypt; <a href="mailto:asaad.matter@f-eng.tanta.edu.eg">asaad.matter@f-eng.tanta.edu.eg</a> (A.M.A.)<br>
+        *Corresponding author
         </div>
         """, unsafe_allow_html=True,
     )
     st.markdown(
         """
         <div class="muted" style="font-size:16px; margin-top:.5rem;">
-        This app provides a fast, interpretable predictor for the relative seawater intrusion (SWI) wedge length (L/Lo)
-        under artificial recharge and cutoff wall configurations.
+        Journal: <strong>CATEAN</strong>
         </div>
         """, unsafe_allow_html=True,
     )
 
     citation = (
-        "Elshaarawy, M.K., & Armanuos, A.M. (n.d.). Machine Learning-Based Modeling of Artificial Recharge "
-        "and Cutoff Walls for Seawater Intrusion Control in Coastal Aquifers. [Software]."
+        "Elshaarawy, M. K., & Armanuos, A. M. (n.d.). "
+        "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for Saltwater Intrusion Control "
+        "with Explainable ML and GUI Deployment. CATEAN."
     )
     st.download_button("Download Citation (.txt)", data=citation.encode("utf-8"),
                        file_name="citation.txt", mime="text/plain")
