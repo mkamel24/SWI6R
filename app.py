@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------
 # SWI Wedge Length Ratio (L/Lo) — Smart Predictor (CatBoost)
-#   - Model: repo-relative models/CGB.joblib
-#   - GUI title == paper title (slightly smaller font)
-#   - Authors & affiliations updated per provided text
-#   - Clean card-style UI (inputs left, sketch right, actions bottom)
+#   - Model load: repo path models/CGB.joblib OR upload .joblib
+#   - Clean, card-style GUI (Predict, Explain (SHAP), Batch, History, Article Info)
+#   - Paper title as header (reduced font) + updated authors/affiliations
+#   - Deterministic CPU inference where possible
 # ------------------------------------------------------------
 
 import io
@@ -13,11 +13,13 @@ from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 
-import joblib
 import numpy as np
 import pandas as pd
-from PIL import Image
 import streamlit as st
+from PIL import Image
+import joblib
+import shap
+import matplotlib.pyplot as plt
 
 # ==============================
 # Page / theme config
@@ -34,12 +36,12 @@ st.markdown(
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Source+Serif+4:wght@500;700&display=swap');
 
       :root {
-        --ui-bg: #ffffff;
-        --ui-card: #ffffff;
-        --ui-border: #cccccc;
-        --ui-text: #000000;
-        --ui-text-muted: #666666;
-        --ui-accent: #000000;
+        --ui-bg: #ffffff;          /* main background */
+        --ui-card: #ffffff;        /* cards */
+        --ui-border: #cccccc;      /* borders */
+        --ui-text: #000000;        /* main text */
+        --ui-text-muted: #666666;  /* muted text */
+        --ui-accent: #000000;      /* accent (black) */
       }
 
       .stApp { background: var(--ui-bg); color: var(--ui-text); }
@@ -69,6 +71,7 @@ st.markdown(
         margin: .2rem 0 .8rem;
       }
 
+      /* Inputs */
       input, textarea, select {
         background: var(--ui-card) !important;
         color: var(--ui-text) !important;
@@ -81,7 +84,14 @@ st.markdown(
         border: 1px solid var(--ui-border) !important;
         border-radius: 10px !important;
       }
+      .stSelectbox div[role="combobox"] {
+        background: var(--ui-card);
+        border: 1px solid var(--ui-border);
+        border-radius: 10px;
+        color: var(--ui-text);
+      }
 
+      /* Buttons */
       .stButton > button[kind="primary"] {
         background: #ffffff !important;
         color: #000000 !important;
@@ -99,6 +109,7 @@ st.markdown(
         font-weight: 700;
       }
 
+      /* Tabs */
       .stTabs [data-baseweb="tab-list"] { gap: 8px; }
       .stTabs [data-baseweb="tab"] {
         background: #ffffff;
@@ -114,6 +125,7 @@ st.markdown(
         border-color: var(--ui-accent) !important;
       }
 
+      /* Tables */
       .stDataFrame {
         background: var(--ui-card);
         border: 1px solid var(--ui-border);
@@ -126,6 +138,7 @@ st.markdown(
         font-weight: 800;
       }
 
+      /* Uploader */
       [data-testid="stFileUploader"] section {
         border: 1px dashed var(--ui-border);
         background: #f9f9f9;
@@ -133,6 +146,8 @@ st.markdown(
         padding: .8rem;
         color: var(--ui-text);
       }
+
+      .muted { color: var(--ui-text-muted); font-size: 0.95rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -159,17 +174,18 @@ ARTICLE_AFFILS_HTML = (
 ARTICLE_JOURNAL = "Catena"
 
 # ==============================
-# App configuration
+# Config / constants
 # ==============================
 MODEL_PATH_DEFAULT = "models/CGB.joblib"  # repo-relative CatBoost model
 IMAGE_CANDIDATES = [
-    Path("assets/sketch.png"),
     Path("assets/sketch22.png"),
-    Path("sketch.png"),
+    Path("assets/sketch.png"),
     Path("sketch22.png"),
+    Path("sketch.png"),
 ]
 
-FEATURE_ORDER = [
+# Feature names (MUST match training order)
+FEATURE_KEYS = [
     "ρs/ρf",       # X1  Relative density
     "K/Ko",        # X2  Relative hydraulic conductivity
     "Qi/(Ko·Lo²)", # X3  Relative recharge rate
@@ -191,6 +207,7 @@ HELP = {
     "Db/Lo": "Barrier wall depth (relative).",
 }
 
+# Defaults (tune for your dataset)
 DEFAULTS = {
     "ρs/ρf": 1.025,
     "K/Ko": 1.000,
@@ -202,12 +219,16 @@ DEFAULTS = {
     "Db/Lo": 0.323,
 }
 
-PRESETS = {
-    "— choose a preset —": None,
-    "Baseline (defaults)": DEFAULTS,
-    "Higher recharge": {**DEFAULTS, "Qi/(Ko·Lo²)": 0.0015},
-    "Deeper barrier":   {**DEFAULTS, "Db/Lo": 0.45},
-    "Farther barrier":  {**DEFAULTS, "Xb/Lo": 0.60},
+# Reasonable global ranges for SHAP uniform background (edit if you have dataset mins/maxes)
+FEATURE_RANGES = {
+    "ρs/ρf":       (0.995, 1.035, DEFAULTS["ρs/ρf"]),
+    "K/Ko":        (0.30,  2.50,  DEFAULTS["K/Ko"]),
+    "Qi/(Ko·Lo²)": (1e-5,  5e-3,  DEFAULTS["Qi/(Ko·Lo²)"]),
+    "i":           (1e-3,  0.05,  DEFAULTS["i"]),
+    "Xi/Lo":       (0.10,  3.00,  DEFAULTS["Xi/Lo"]),
+    "Yi/Lo":       (0.05,  1.00,  DEFAULTS["Yi/Lo"]),
+    "Xb/Lo":       (0.05,  2.00,  DEFAULTS["Xb/Lo"]),
+    "Db/Lo":       (0.05,  1.00,  DEFAULTS["Db/Lo"]),
 }
 
 NUM_SPEC = {
@@ -221,43 +242,24 @@ NUM_SPEC = {
     "Db/Lo":       dict(step=1e-3, fmt="%.6f"),
 }
 
-# ==============================
-# Session state
-# ==============================
-if "model" not in st.session_state:
-    st.session_state.model = None
-if "model_path" not in st.session_state:
-    st.session_state.model_path = MODEL_PATH_DEFAULT
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "last_inputs" not in st.session_state:
-    st.session_state.last_inputs = None
-if "current_pred" not in st.session_state:
-    st.session_state.current_pred = None
-if "current_inputs" not in st.session_state:
-    st.session_state.current_inputs = {k: float(v) for k, v in DEFAULTS.items()}
-if "sketch_bytes" not in st.session_state:
-    st.session_state.sketch_bytes = None
-if "image_path" not in st.session_state:
-    st.session_state.image_path = ""  # optional manual path if you want
+PRESETS = {
+    "— choose a preset —": None,
+    "Baseline (defaults)": DEFAULTS,
+    "Higher recharge": {**DEFAULTS, "Qi/(Ko·Lo²)": 0.0015},
+    "Deeper barrier":   {**DEFAULTS, "Db/Lo": 0.45},
+    "Farther barrier":  {**DEFAULTS, "Xb/Lo": 0.60},
+}
 
 # ==============================
-# Utilities
+# Helpers
 # ==============================
-def load_model(path_or_bytes):
-    """Load CatBoost/scikit model from path or uploaded file (.joblib)."""
-    if hasattr(path_or_bytes, "read"):
-        data = path_or_bytes.read()
-        return joblib.load(io.BytesIO(data))
-    return joblib.load(path_or_bytes)
-
-def force_deterministic_cpu(model_obj):
-    """Best-effort: make CatBoost run on CPU with single thread."""
+def _force_catboost_cpu_single_thread(model_obj):
+    """Best-effort: force CatBoost to CPU, 1 thread (safe no-op for other models)."""
     try:
         import catboost
         if isinstance(model_obj, (catboost.CatBoostRegressor, catboost.CatBoostClassifier)):
             try:
-                model_obj.set_params(task_type='CPU', thread_count=1, random_seed=42)
+                model_obj.set_params(task_type="CPU", thread_count=1, random_seed=42)
             except Exception:
                 pass
     except Exception:
@@ -269,25 +271,28 @@ def force_deterministic_cpu(model_obj):
         pass
     return model_obj
 
-def predict_single(model_obj, inputs_dict):
-    """Return float prediction given inputs ordered per FEATURE_ORDER."""
-    x = np.array([[float(inputs_dict[k]) for k in FEATURE_ORDER]], dtype=np.float32)
-    y = model_obj.predict(x)
-    try:
-        return float(np.ravel(y)[0])
-    except Exception:
-        return float(y)
+def _ordered_df(values: dict, expected_names: list | None):
+    """Build 1-row DataFrame in model's expected order when available."""
+    if expected_names and set(map(str, expected_names)) == set(FEATURE_KEYS):
+        cols = list(map(str, expected_names))
+    else:
+        cols = FEATURE_KEYS[:]
+    row = [values[c] for c in cols]
+    return pd.DataFrame([row], columns=cols).astype(np.float32)
 
-def push_history_row(inputs_dict, pred_val):
-    row = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    row.update({k: float(inputs_dict[k]) for k in FEATURE_ORDER})
-    row["Pred_L_over_Lo"] = round(float(pred_val), 6)
-    st.session_state.history.append(row)
-
-def history_dataframe():
-    if not st.session_state.history:
-        return pd.DataFrame(columns=["Time"] + FEATURE_ORDER + ["Pred_L_over_Lo"])
-    return pd.DataFrame(st.session_state.history)
+def _get_model_feature_names(model_obj):
+    """Try to read feature names from model (CatBoost/pandas training)."""
+    names = None
+    for attr in ("feature_names_in_", "feature_names_", "feature_names"):
+        if hasattr(model_obj, attr):
+            try:
+                candidates = list(getattr(model_obj, attr))
+                if candidates and set(candidates) == set(FEATURE_KEYS):
+                    names = candidates
+                    break
+            except Exception:
+                pass
+    return names
 
 def json_download_bytes(obj):
     buf = BytesIO()
@@ -295,94 +300,111 @@ def json_download_bytes(obj):
     buf.seek(0)
     return buf
 
-def copy_to_clipboard_js(text):
-    st.components.v1.html(
-        f"""
-        <button onclick="navigator.clipboard.writeText('{text}');"
-                style="padding:8px 12px;border:1px solid #ccc;background:#fff;border-radius:10px;cursor:pointer;font-weight:700;">
-            Copy Result
-        </button>
-        """,
-        height=48,
-    )
+def sample_background_df(ranges: dict, n: int = 256, seed: int | None = None) -> pd.DataFrame:
+    rng = np.random.default_rng(None if seed is None else int(seed))
+    data = {}
+    for k in FEATURE_KEYS:
+        lo, hi, _ = ranges[k]
+        data[k] = rng.uniform(float(lo), float(hi), size=n)
+    return pd.DataFrame(data).astype(np.float32)
 
 def find_local_image() -> Image.Image | None:
-    if st.session_state.sketch_bytes is not None:
-        try:
-            return Image.open(BytesIO(st.session_state.sketch_bytes))
-        except Exception:
-            pass
-    p = Path(st.session_state.image_path) if st.session_state.image_path else None
-    if p and p.exists():
-        try:
-            return Image.open(p)
-        except Exception:
-            pass
-    for cand in IMAGE_CANDIDATES:
-        if cand.exists():
+    for p in IMAGE_CANDIDATES:
+        if p.exists():
             try:
-                return Image.open(cand)
+                return Image.open(p)
             except Exception:
                 pass
     return None
 
+def ranges_key_tuple() -> tuple:
+    """Hashable key for caching background SHAP when ranges change."""
+    return tuple((k, tuple(map(float, FEATURE_RANGES[k]))) for k in FEATURE_KEYS)
+
+def clip_to_bounds(vals: dict) -> dict:
+    out = {}
+    for k, v in vals.items():
+        lo, hi, _ = FEATURE_RANGES[k]
+        out[k] = min(max(float(v), float(lo)), float(hi))
+    return out
+
 # ==============================
-# Sidebar: model & reference image
+# Session state
+# ==============================
+if "model" not in st.session_state:
+    st.session_state.model = None
+if "model_origin" not in st.session_state:
+    st.session_state.model_origin = f"path:{MODEL_PATH_DEFAULT}"
+if "expected_names" not in st.session_state:
+    st.session_state.expected_names = None
+if "last_inputs" not in st.session_state:
+    st.session_state.last_inputs = None
+if "history" not in st.session_state:
+    st.session_state.history = []  # list of dicts, each with time + Xs + pred
+if "current_pred" not in st.session_state:
+    st.session_state.current_pred = None
+if "current_inputs" not in st.session_state:
+    st.session_state.current_inputs = {k: DEFAULTS[k] for k in FEATURE_KEYS}
+if "sketch_bytes" not in st.session_state:
+    st.session_state.sketch_bytes = None
+if "bg_file_bytes" not in st.session_state:
+    st.session_state.bg_file_bytes = None
+
+# ==============================
+# Sidebar: model loader (repo path OR upload)
 # ==============================
 with st.sidebar:
-    st.header("Model & Resources")
+    st.header("Model Loader")
+    mode = st.radio("Load CatBoost model from:", ["Repo path", "Upload"], horizontal=True)
 
-    st.subheader("Model (CatBoost .joblib)")
-    model_source = st.radio("Load model from:", ["Repo path", "Upload"], horizontal=True)
-
-    if model_source == "Repo path":
-        st.write("Using repo-relative default: `models/CGB.joblib`")
-        mp = st.text_input("Model path (.joblib)", st.session_state.model_path)
-        c1, c2 = st.columns([1,1])
-        with c1:
-            if st.button("Load model", type="primary", use_container_width=True):
-                try:
-                    st.session_state.model = force_deterministic_cpu(load_model(mp))
-                    st.session_state.model_path = mp
-                    st.success("CatBoost model loaded.")
-                except Exception as e:
-                    st.error(f"Model load failed: {e}")
-        with c2:
-            if st.button("Clear model", use_container_width=True):
-                st.session_state.model = None
-                st.info("Model cleared.")
-    else:
-        uploaded_model = st.file_uploader("Upload CatBoost .joblib", type=["joblib"])
-        if uploaded_model and st.button("Load uploaded model", type="primary", use_container_width=True):
+    if mode == "Repo path":
+        exists = Path(MODEL_PATH_DEFAULT).exists()
+        st.caption(f"Default path: `{MODEL_PATH_DEFAULT}` — {'✅ found' if exists else '❗ not found'}")
+        mp = st.text_input("Model path (.joblib)", MODEL_PATH_DEFAULT)
+        if st.button("Load model", type="primary", use_container_width=True):
             try:
-                st.session_state.model = force_deterministic_cpu(load_model(uploaded_model))
-                st.success("Uploaded CatBoost model loaded.")
+                st.session_state.model = joblib.load(mp)
+                st.session_state.model = _force_catboost_cpu_single_thread(st.session_state.model)
+                st.session_state.expected_names = _get_model_feature_names(st.session_state.model)
+                st.session_state.model_origin = f"path:{mp}"
+                st.success("Model loaded from path.")
+            except Exception as e:
+                st.error(f"Model load failed: {e}")
+    else:
+        up_model = st.file_uploader("Upload .joblib model", type=["joblib"])
+        if up_model and st.button("Load uploaded model", type="primary", use_container_width=True):
+            try:
+                st.session_state.model = joblib.load(io.BytesIO(up_model.read()))
+                st.session_state.model = _force_catboost_cpu_single_thread(st.session_state.model)
+                st.session_state.expected_names = _get_model_feature_names(st.session_state.model)
+                st.session_state.model_origin = "upload:memory"
+                st.success("Uploaded model loaded.")
             except Exception as e:
                 st.error(f"Model load failed: {e}")
 
-    st.subheader("Reference Image (optional fallback path)")
-    st.session_state.image_path = st.text_input("Image path", st.session_state.image_path)
+    if st.button("Clear model", use_container_width=True):
+        st.session_state.model = None
+        st.session_state.expected_names = None
+        st.info("Model cleared.")
 
 # ==============================
-# Header (paper title, smaller font)
+# Header (paper title smaller font)
 # ==============================
 st.markdown(
     f"""
     <div style="font-size:26px; font-weight:800; line-height:1.25; margin-bottom:.25rem;">
       {ARTICLE_TITLE}
     </div>
-    <div style="color:#666; margin-bottom:.75rem;">
-      CatBoost model: <code>{MODEL_PATH_DEFAULT}</code>
+    <div class="muted" style="margin-bottom:.75rem;">
+      Model source: <code>{st.session_state.model_origin}</code>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# ==============================
 # Tabs
-# ==============================
-tab_predict, tab_batch, tab_hist, tab_article = st.tabs(
-    ["Predict", "Batch", "History", "Article Info"]
+tab_predict, tab_explain, tab_batch, tab_hist, tab_article = st.tabs(
+    ["Predict", "Explain", "Batch", "History", "Article Info"]
 )
 
 # ==============================
@@ -403,75 +425,66 @@ with tab_predict:
 
         st.markdown("#### Input Parameters (Dimensionless)")
 
-        # Preset selector
+        # Preset
         preset = st.selectbox("Preset", list(PRESETS.keys()), index=0)
         if PRESETS.get(preset):
-            st.session_state.current_inputs = {k: float(v) for k, v in PRESETS[preset].items()}
+            st.session_state.current_inputs = PRESETS[preset].copy()
 
-        # Inputs grid (4 per row)
-        ordered_keys = FEATURE_ORDER[:]
+        # Number inputs (4 per row)
+        ordered_keys = FEATURE_KEYS[:]
         for i in range(0, len(ordered_keys), 4):
             cols = st.columns(4)
             for j, k in enumerate(ordered_keys[i:i+4]):
-                spec = NUM_SPEC.get(k, dict(step=1e-4, fmt="%.6f"))
-                default_val = float(st.session_state.current_inputs.get(k, DEFAULTS.get(k, 0.0)))
+                spec = NUM_SPEC[k]
+                default_val = float(st.session_state.current_inputs.get(k, DEFAULTS[k]))
                 with cols[j]:
                     st.session_state.current_inputs[k] = st.number_input(
-                        k,
-                        value=default_val,
-                        step=float(spec["step"]),
-                        format=spec["fmt"],
-                        help=HELP.get(k, ""),
+                        k, value=default_val, step=float(spec["step"]),
+                        format=spec["fmt"], help=HELP.get(k, "")
                     )
 
-        st.caption("Tip: Save/Load your inputs with JSON; use Recall to restore previous run.")
+        st.caption("Tip: Use **Save Inputs (JSON)** to download a template; **Load Inputs** to restore.")
 
         # Bottom row buttons
-        c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
+        c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
         with c1:
             if st.button("Predict", use_container_width=True, type="primary"):
                 if st.session_state.model is None:
-                    st.error("Load the CatBoost model first (sidebar).")
+                    st.error("Please load the CatBoost model (sidebar).")
                 else:
                     try:
-                        yhat = predict_single(st.session_state.model, st.session_state.current_inputs)
-                        st.session_state.current_pred = float(yhat)
+                        vals = clip_to_bounds(st.session_state.current_inputs)
+                        X = _ordered_df(vals, st.session_state.expected_names)
+                        y = st.session_state.model.predict(X.values)
+                        y = float(np.ravel(y)[0])
+                        st.session_state.current_pred = y
                         st.session_state.last_inputs = st.session_state.current_inputs.copy()
-                        push_history_row(st.session_state.current_inputs, yhat)
+                        rec = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **vals, "Prediction": round(y, 6)}
+                        st.session_state.history.append(rec)
                         st.success("Prediction complete.")
                     except Exception as e:
                         st.error(f"Prediction error: {e}")
-
         with c2:
             if st.button("Clear", use_container_width=True):
                 st.session_state.current_pred = None
-                st.session_state.current_inputs = {k: float(v) for k, v in DEFAULTS.items()}
+                st.session_state.current_inputs = {k: DEFAULTS[k] for k in FEATURE_KEYS}
                 st.info("Cleared.")
-
         with c3:
             disabled = st.session_state.last_inputs is None
             if st.button("Recall Last", use_container_width=True, disabled=disabled):
                 if st.session_state.last_inputs is not None:
-                    st.session_state.current_inputs = {k: float(v) for k, v in st.session_state.last_inputs.items()}
+                    st.session_state.current_inputs = st.session_state.last_inputs.copy()
                     st.success("Recalled last inputs.")
-
         with c4:
-            if st.session_state.current_pred is not None:
-                copy_to_clipboard_js(f"{st.session_state.current_pred:.6f}")
-            else:
-                st.button("Copy Result", disabled=True, use_container_width=True)
-
-        with c5:
             buf = json_download_bytes(st.session_state.current_inputs)
-            st.download_button("Save Inputs (JSON)", data=buf, file_name="swi_inputs.json",
+            st.download_button("Save Inputs (JSON)", data=buf, file_name="inputs.json",
                                mime="application/json", use_container_width=True)
-
-        with c6:
+        with c5:
             up = st.file_uploader("Load Inputs", type=["json"], label_visibility="collapsed", key="upl_json_predict")
             if up is not None:
                 try:
                     data = json.loads(up.read().decode("utf-8"))
-                    for k in FEATURE_ORDER:
+                    for k in FEATURE_KEYS:
                         if k in data:
                             st.session_state.current_inputs[k] = float(data[k])
                     st.success("Inputs loaded.")
@@ -481,81 +494,195 @@ with tab_predict:
     # RIGHT: reference sketch (with upload fallback)
     with col_right:
         st.markdown("#### Reference Sketch")
-        up_img = st.file_uploader("Upload sketch (PNG/JPG)", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
-        if up_img is not None:
-            st.session_state.sketch_bytes = up_img.read()
+        up = st.file_uploader("Upload sketch (PNG/JPG)", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
+        if up is not None:
+            st.session_state.sketch_bytes = up.read()
 
-        img = find_local_image()
+        img = None
+        if st.session_state.sketch_bytes is not None:
+            try:
+                img = Image.open(BytesIO(st.session_state.sketch_bytes))
+            except Exception:
+                st.warning("Uploaded file isn't a valid image. Falling back to local file…")
+
         if img is None:
-            st.info("No image found. Place one at `assets/sketch.png` / `assets/sketch22.png`, set a path in the sidebar, or upload above.")
+            img = find_local_image()
+
+        if img is None:
+            st.info("No image found. Add one at `assets/sketch22.png` / `assets/sketch.png` in the repo or upload above.")
         else:
             st.image(img, use_container_width=True)
+
+# ==============================
+# Explain tab (SHAP)
+# ==============================
+with tab_explain:
+    st.markdown("### Explain (SHAP)")
+    if st.session_state.model is None:
+        st.info("Load a model first (sidebar) to enable SHAP explanations.")
+    else:
+        bg_src = st.radio("Background source for global SHAP:",
+                          ["Uniform (use bounds below)", "Dataset (upload CSV)"],
+                          horizontal=True)
+        n_bg = st.slider("Background sample size", 100, 2000, 256, 50,
+                         help="Larger = smoother but slower. 256–512 is good for 8 features.")
+        seed = st.number_input("Random seed", min_value=0, max_value=10000, value=42, step=1)
+
+        try:
+            # Build background data
+            if bg_src.startswith("Uniform"):
+                df_bg = sample_background_df(FEATURE_RANGES, n_bg, int(seed))
+            else:
+                up_bg = st.file_uploader("Upload CSV with columns matching the model features", type=["csv"], key="bg_csv")
+                if up_bg is None:
+                    st.info("Upload a CSV containing the 8 feature columns to compute dataset-based SHAP.")
+                    st.stop()
+                df = pd.read_csv(up_bg)
+                missing = [c for c in FEATURE_KEYS if c not in df.columns]
+                if missing:
+                    st.error(f"Dataset missing columns: {missing}")
+                    st.stop()
+                if len(df) > n_bg:
+                    df_bg = df.sample(n=n_bg, random_state=int(seed)).reset_index(drop=True)
+                else:
+                    df_bg = df.copy().reset_index(drop=True)
+
+            # Align column order to model expectation
+            expected_names = st.session_state.expected_names
+            X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names)
+            X_bg = df_bg[X_bg.columns].astype(np.float32)
+
+            # Explainer + SHAP values
+            explainer = shap.Explainer(st.session_state.model)
+            sv_bg = explainer(X_bg)
+
+            # Global: bar + beeswarm
+            colA, colB = st.columns(2)
+            with colA:
+                st.write("**Mean absolute SHAP (bar)**")
+                fig = plt.figure(figsize=(7, 4))
+                shap.summary_plot(sv_bg.values, X_bg, plot_type="bar", show=False)
+                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+            with colB:
+                st.write("**Beeswarm (distribution of impacts)**")
+                fig = plt.figure(figsize=(7, 4))
+                shap.summary_plot(sv_bg.values, X_bg, show=False)
+                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+
+            # Dependence plots
+            mean_abs = np.mean(np.abs(sv_bg.values), axis=0)
+            ordered_cols = list(X_bg.columns)
+            order_idx = np.argsort(-mean_abs)
+            top_feats = [ordered_cols[i] for i in order_idx[:5]]
+
+            st.write("**Dependence plots**")
+            dep1 = st.selectbox("Primary feature", top_feats, index=0, key="dep1")
+            dep2_options = ["(auto color)"] + [c for c in ordered_cols if c != dep1]
+            dep2 = st.selectbox("Color by (optional)", dep2_options, index=0, key="dep2")
+            interaction = dep2 if dep2 != "(auto color)" else "auto"
+
+            try:
+                fig, ax = plt.subplots(figsize=(7, 4))
+                shap.dependence_plot(
+                    dep1,
+                    sv_bg.values,
+                    X_bg,
+                    interaction_index=interaction,
+                    show=False,
+                    ax=ax
+                )
+                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+                plt.close(fig)
+            except Exception:
+                fig, ax = plt.subplots(figsize=(7, 4))
+                if dep2 == "(auto color)":
+                    shap.plots.scatter(sv_bg[:, dep1], ax=ax, show=False)
+                else:
+                    shap.plots.scatter(sv_bg[:, dep1], color=sv_bg[:, dep2], ax=ax, show=False)
+                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+                plt.close(fig)
+
+            # Local SHAP for current inputs
+            with st.expander("Local explanation for current inputs", expanded=True):
+                if st.session_state.current_pred is None:
+                    st.info("Make a prediction first in the Predict tab to see the local explanation.")
+                else:
+                    values = {k: float(st.session_state.current_inputs[k]) for k in FEATURE_KEYS}
+                    X_one = _ordered_df(values, expected_names)
+                    sv_one = explainer(X_one)
+                    st.write("**Waterfall (feature contributions)**")
+                    try:
+                        fig = plt.figure(figsize=(7, 5))
+                        shap.plots.waterfall(sv_one[0], max_display=8, show=False)
+                        st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+                    except Exception:
+                        fig = plt.figure(figsize=(7, 4))
+                        shap.plots.bar(sv_one[0], show=False, max_display=8)
+                        st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+
+        except Exception as e:
+            st.error(f"SHAP error: {e}")
 
 # ==============================
 # Batch tab
 # ==============================
 with tab_batch:
     st.markdown("### Batch Predictions (CSV → CSV)")
-    st.write("Upload a CSV with **columns matching the model order**:")
-    st.code(", ".join(FEATURE_ORDER), language="text")
+    st.write("Upload a CSV with columns **exactly**:")
+    st.code(", ".join(FEATURE_KEYS), language="text")
 
-    batch_file = st.file_uploader("Upload CSV", type=["csv"])
-    if batch_file is not None:
-        try:
-            df_in = pd.read_csv(batch_file)
-            missing = [c for c in FEATURE_ORDER if c not in df_in.columns]
-            if missing:
-                st.error(f"CSV missing required columns: {missing}")
-            elif st.session_state.model is None:
-                st.error("Load the CatBoost model first (sidebar).")
-            else:
-                X = df_in[FEATURE_ORDER].astype(np.float32).values
-                try:
+    up = st.file_uploader("Upload CSV", type=["csv"])
+    if up:
+        if st.session_state.model is None:
+            st.error("Load the CatBoost model first (sidebar).")
+        else:
+            try:
+                df = pd.read_csv(up)
+                missing = [c for c in FEATURE_KEYS if c not in df.columns]
+                if missing:
+                    st.error(f"CSV missing columns: {missing}")
+                else:
+                    expected_names = st.session_state.expected_names
+                    ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
+                    X = df[ordered_cols].astype(np.float32).values
                     preds = st.session_state.model.predict(X)
                     preds = np.ravel(preds).astype(float)
-                except Exception as e:
-                    st.error(f"Prediction error: {e}")
-                    preds = None
-                if preds is not None:
-                    df_out = df_in.copy()
-                    df_out["Pred_L_over_Lo"] = preds
+                    out = df.copy()
+                    out["Pred_L_over_Lo"] = preds
                     st.success("Batch predictions complete.")
-                    st.dataframe(df_out.head(20), use_container_width=True)
-                    st.download_button("Download results CSV",
-                                       data=df_out.to_csv(index=False).encode("utf-8"),
-                                       file_name="swi_predictions.csv",
-                                       mime="text/csv")
-        except Exception as e:
-            st.error(f"Failed to process CSV: {e}")
+                    st.dataframe(out.head(20), use_container_width=True)
+                    st.download_button("Download predictions CSV",
+                                       data=out.to_csv(index=False).encode("utf-8"),
+                                       file_name="predictions.csv", mime="text/csv")
+            except Exception as e:
+                st.error(f"Batch error: {e}")
 
 # ==============================
 # History tab
 # ==============================
 with tab_hist:
     st.markdown("### Session History")
-    df_hist = history_dataframe()
-    if df_hist.empty:
-        st.info("No predictions yet. Make a run in the Predict tab.")
+    if len(st.session_state.history) == 0:
+        st.info("No history yet. Make a prediction in the Predict tab.")
     else:
-        st.dataframe(df_hist, use_container_width=True)
-        st.download_button("Download history CSV",
-                           data=df_hist.to_csv(index=False).encode("utf-8"),
-                           file_name="swi_history.csv",
-                           mime="text/csv")
+        hist_df = pd.DataFrame(st.session_state.history)
+        st.dataframe(hist_df, use_container_width=True)
+        csv_bytes = hist_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Download History CSV", data=csv_bytes,
+                           file_name="history.csv", mime="text/csv")
         if st.button("Clear History"):
             st.session_state.history = []
             st.rerun()
 
 # ==============================
-# Article Info tab (paper title smaller; updated authors & affiliations)
+# Article Info tab
 # ==============================
 with tab_article:
     st.markdown("### Article & Authors")
-
     st.markdown(
         f"""
         <div style="font-size:24px; font-weight:800; line-height:1.25;">
-          {ARTICLE_TITLE}
+        {ARTICLE_TITLE}
         </div>
         """,
         unsafe_allow_html=True,
@@ -563,26 +690,23 @@ with tab_article:
     st.markdown(
         f"""
         <div style="font-size:18px; font-weight:700; margin-top:0.5rem;">
-          {ARTICLE_AUTHORS_HTML}
+        {ARTICLE_AUTHORS_HTML}
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
     st.markdown(
         f"""
         <div style="font-size:16px; margin-top:0.5rem;">
-          {ARTICLE_AFFILS_HTML}
+        {ARTICLE_AFFILS_HTML}
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
     st.markdown(
         f"""
         <div style="font-size:16px; font-style:italic; margin-top:0.6rem;">
-          {ARTICLE_JOURNAL}
+        {ARTICLE_JOURNAL}
         </div>
-        """,
-        unsafe_allow_html=True,
+        """, unsafe_allow_html=True,
     )
 
     citation = (
