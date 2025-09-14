@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------
-# SWI Wedge Length Ratio (L/Lo) — Streamlined Smart Predictor
-#   GUI style aligned with the "Scientific Reports" app:
-#     - Left: inputs + big-number prediction card
-#     - Right: reference sketch (auto-fit, with upload fallback)
-#     - Bottom row: Predict, Clear, Recall, Copy, Save, Load
-#   Tabs: Predict | Batch | History | Article Info
-#   Sidebar: Model & reference image sources
-#   Deterministic CPU predictions where possible
+# SWI Wedge Length Ratio (L/Lo) — Smart Predictor (CatBoost)
+#   - Styled to match your first GUI (cards, big-number, tabs)
+#   - Defaults to CatBoost model at C:/Users/asus1/Desktop/CGB.joblib
+#   - Forces CPU + single thread for deterministic inference (best-effort)
 # ------------------------------------------------------------
 
 import io
@@ -26,7 +22,7 @@ import streamlit as st
 # Page / theme config
 # ==============================
 st.set_page_config(
-    page_title="SWI Wedge Length Ratio – Smart Predictor (L/Lo)",
+    page_title="SWI Wedge Length Ratio – Smart Predictor (L/Lo, CatBoost)",
     page_icon="🌊",
     layout="wide",
 )
@@ -37,12 +33,12 @@ st.markdown(
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Source+Serif+4:wght@500;700&display=swap');
 
       :root {
-        --ui-bg: #ffffff;          /* main background */
-        --ui-card: #ffffff;        /* cards */
-        --ui-border: #cccccc;      /* borders */
-        --ui-text: #000000;        /* main text */
-        --ui-text-muted: #666666;  /* muted text */
-        --ui-accent: #000000;      /* accent (black) */
+        --ui-bg: #ffffff;
+        --ui-card: #ffffff;
+        --ui-border: #cccccc;
+        --ui-text: #000000;
+        --ui-text-muted: #666666;
+        --ui-accent: #000000;
       }
 
       .stApp { background: var(--ui-bg); color: var(--ui-text); }
@@ -72,7 +68,6 @@ st.markdown(
         margin: .2rem 0 .8rem;
       }
 
-      /* Inputs */
       input, textarea, select {
         background: var(--ui-card) !important;
         color: var(--ui-text) !important;
@@ -85,14 +80,7 @@ st.markdown(
         border: 1px solid var(--ui-border) !important;
         border-radius: 10px !important;
       }
-      .stSelectbox div[role="combobox"] {
-        background: var(--ui-card);
-        border: 1px solid var(--ui-border);
-        border-radius: 10px;
-        color: var(--ui-text);
-      }
 
-      /* Buttons */
       .stButton > button[kind="primary"] {
         background: #ffffff !important;
         color: #000000 !important;
@@ -110,7 +98,6 @@ st.markdown(
         font-weight: 700;
       }
 
-      /* Tabs */
       .stTabs [data-baseweb="tab-list"] { gap: 8px; }
       .stTabs [data-baseweb="tab"] {
         background: #ffffff;
@@ -126,7 +113,6 @@ st.markdown(
         border-color: var(--ui-accent) !important;
       }
 
-      /* Tables */
       .stDataFrame {
         background: var(--ui-card);
         border: 1px solid var(--ui-border);
@@ -139,7 +125,6 @@ st.markdown(
         font-weight: 800;
       }
 
-      /* Uploader */
       [data-testid="stFileUploader"] section {
         border: 1px dashed var(--ui-border);
         background: #f9f9f9;
@@ -147,15 +132,13 @@ st.markdown(
         padding: .8rem;
         color: var(--ui-text);
       }
-
-      .muted { color: var(--ui-text-muted); font-size: 0.95rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ==============================
-# Article strings
+# Article strings (keep/edit)
 # ==============================
 ARTICLE_TITLE   = "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for Saltwater Intrusion Control with Explainable ML and GUI Deployment"
 ARTICLE_AUTHORS = "Mohamed Kamel Elshaarawy¹,*; Asaad M. Armanuos²,*"
@@ -168,7 +151,7 @@ ARTICLE_AFFILS  = [
 # ==============================
 # App configuration
 # ==============================
-MODEL_PATH_DEFAULT = r"C:/Users/asus1/Desktop/CGB1.joblib"   # default .joblib path
+MODEL_PATH_DEFAULT = r"C:/Users/asus1/Desktop/CGB.joblib"  # <-- CatBoost model here
 IMAGE_CANDIDATES = [
     Path(r"C:/Users/asus1/Desktop/sketch.png"),
     Path("assets/sketch.png"),
@@ -177,7 +160,6 @@ IMAGE_CANDIDATES = [
     Path("sketch22.png"),
 ]
 
-# Feature order MUST match the model’s training order
 FEATURE_ORDER = [
     "ρs/ρf",       # X1  Relative density
     "K/Ko",        # X2  Relative hydraulic conductivity
@@ -200,7 +182,6 @@ HELP = {
     "Db/Lo": "Barrier wall depth (relative).",
 }
 
-# Defaults (you can tune these)
 DEFAULTS = {
     "ρs/ρf": 1.025,
     "K/Ko": 1.000,
@@ -212,7 +193,6 @@ DEFAULTS = {
     "Db/Lo": 0.323,
 }
 
-# Optional simple presets (edit safely)
 PRESETS = {
     "— choose a preset —": None,
     "Baseline (defaults)": DEFAULTS,
@@ -221,7 +201,6 @@ PRESETS = {
     "Farther barrier":  {**DEFAULTS, "Xb/Lo": 0.60},
 }
 
-# Numeric formatting per-field
 NUM_SPEC = {
     "ρs/ρf":       dict(step=1e-4, fmt="%.6f"),
     "K/Ko":        dict(step=1e-4, fmt="%.6f"),
@@ -241,7 +220,7 @@ if "model" not in st.session_state:
 if "model_path" not in st.session_state:
     st.session_state.model_path = MODEL_PATH_DEFAULT
 if "history" not in st.session_state:
-    st.session_state.history = []  # list of dict rows
+    st.session_state.history = []
 if "last_inputs" not in st.session_state:
     st.session_state.last_inputs = None
 if "current_pred" not in st.session_state:
@@ -257,22 +236,32 @@ if "image_path" not in st.session_state:
 # Utilities
 # ==============================
 def load_model(path_or_bytes):
-    """Lazy-load joblib model from a filesystem path or uploaded file (BytesIO)."""
+    """Load CatBoost/scikit model from path or uploaded file (.joblib)."""
     if hasattr(path_or_bytes, "read"):
         data = path_or_bytes.read()
         return joblib.load(io.BytesIO(data))
     return joblib.load(path_or_bytes)
 
-def force_cpu_predictor_if_available(model_obj):
-    """Best-effort to keep predictions deterministic and CPU-bound."""
+def force_deterministic_cpu(model_obj):
+    """
+    Best-effort: make CatBoost run on CPU with single thread.
+    Works when the loaded object is catboost.CatBoostRegressor/Classifier
+    or a scikit wrapper with set_params().
+    """
     try:
-        booster = model_obj.get_booster()
-        booster.set_param({"predictor": "cpu_predictor", "nthread": 1})
+        import catboost
+        if isinstance(model_obj, (catboost.CatBoostRegressor, catboost.CatBoostClassifier)):
+            try:
+                # Most common CatBoost knobs for inference determinism/CPU
+                model_obj.set_params(task_type='CPU', thread_count=1, random_seed=42)
+            except Exception:
+                pass
     except Exception:
-        pass
+        pass  # CatBoost not installed or different estimator
     try:
+        # Scikit-style escape hatch
         if hasattr(model_obj, "set_params"):
-            model_obj.set_params(n_jobs=1)
+            model_obj.set_params(thread_count=1)
     except Exception:
         pass
     return model_obj
@@ -315,20 +304,17 @@ def copy_to_clipboard_js(text):
     )
 
 def find_local_image() -> Image.Image | None:
-    # Uploaded bytes take priority
     if st.session_state.sketch_bytes is not None:
         try:
             return Image.open(BytesIO(st.session_state.sketch_bytes))
         except Exception:
             pass
-    # Try declared path
     p = Path(st.session_state.image_path) if st.session_state.image_path else None
     if p and p.exists():
         try:
             return Image.open(p)
         except Exception:
             pass
-    # Try fallbacks
     for cand in IMAGE_CANDIDATES:
         if cand.exists():
             try:
@@ -343,7 +329,7 @@ def find_local_image() -> Image.Image | None:
 with st.sidebar:
     st.header("Model & Resources")
 
-    st.subheader("Model")
+    st.subheader("Model (CatBoost .joblib)")
     model_source = st.radio("Load model from:", ["Path", "Upload"], horizontal=True)
     if model_source == "Path":
         mp = st.text_input("Model path (.joblib)", st.session_state.model_path)
@@ -351,9 +337,9 @@ with st.sidebar:
         with c1:
             if st.button("Load model", type="primary", use_container_width=True):
                 try:
-                    st.session_state.model = force_cpu_predictor_if_available(load_model(mp))
+                    st.session_state.model = force_deterministic_cpu(load_model(mp))
                     st.session_state.model_path = mp
-                    st.success("Model loaded.")
+                    st.success("CatBoost model loaded.")
                 except Exception as e:
                     st.error(f"Model load failed: {e}")
         with c2:
@@ -361,11 +347,11 @@ with st.sidebar:
                 st.session_state.model = None
                 st.info("Model cleared.")
     else:
-        uploaded_model = st.file_uploader("Upload .joblib model", type=["joblib"])
+        uploaded_model = st.file_uploader("Upload CatBoost .joblib", type=["joblib"])
         if uploaded_model and st.button("Load uploaded model", type="primary", use_container_width=True):
             try:
-                st.session_state.model = force_cpu_predictor_if_available(load_model(uploaded_model))
-                st.success("Uploaded model loaded.")
+                st.session_state.model = force_deterministic_cpu(load_model(uploaded_model))
+                st.success("Uploaded CatBoost model loaded.")
             except Exception as e:
                 st.error(f"Model load failed: {e}")
 
@@ -375,8 +361,8 @@ with st.sidebar:
 # ==============================
 # Header
 # ==============================
-st.title("SWI Wedge Length Ratio – Smart Predictor (L/Lo)")
-st.caption("For users, technicians, water resources engineers, and hydrogeologists – quick, reliable, and explainable-style UI.")
+st.title("SWI Wedge Length Ratio – Smart Predictor (L/Lo, CatBoost)")
+st.caption("CatBoost model • quick, reliable, and clean UI.")
 
 # ==============================
 # Tabs
@@ -424,14 +410,14 @@ with tab_predict:
                         help=HELP.get(k, ""),
                     )
 
-        st.caption("Tip: Use **Save Inputs (JSON)** to download a template; **Load Inputs** to restore.")
+        st.caption("Tip: Save/Load your inputs with JSON; use Recall to restore previous run.")
 
         # Bottom row buttons
         c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
         with c1:
             if st.button("Predict", use_container_width=True, type="primary"):
                 if st.session_state.model is None:
-                    st.error("Load a model first (sidebar).")
+                    st.error("Load the CatBoost model first (sidebar).")
                 else:
                     try:
                         yhat = predict_single(st.session_state.model, st.session_state.current_inputs)
@@ -507,7 +493,7 @@ with tab_batch:
             if missing:
                 st.error(f"CSV missing required columns: {missing}")
             elif st.session_state.model is None:
-                st.error("Load a model first (sidebar).")
+                st.error("Load the CatBoost model first (sidebar).")
             else:
                 X = df_in[FEATURE_ORDER].astype(np.float32).values
                 try:
@@ -517,4 +503,71 @@ with tab_batch:
                     st.error(f"Prediction error: {e}")
                     preds = None
                 if preds is not None:
-                    df_ou_
+                    df_out = df_in.copy()
+                    df_out["Pred_L_over_Lo"] = preds
+                    st.success("Batch predictions complete.")
+                    st.dataframe(df_out.head(20), use_container_width=True)
+                    st.download_button("Download results CSV",
+                                       data=df_out.to_csv(index=False).encode("utf-8"),
+                                       file_name="swi_predictions.csv",
+                                       mime="text/csv")
+        except Exception as e:
+            st.error(f"Failed to process CSV: {e}")
+
+# ==============================
+# History tab
+# ==============================
+with tab_hist:
+    st.markdown("### Session History")
+    df_hist = history_dataframe()
+    if df_hist.empty:
+        st.info("No predictions yet. Make a run in the Predict tab.")
+    else:
+        st.dataframe(df_hist, use_container_width=True)
+        st.download_button("Download history CSV",
+                           data=df_hist.to_csv(index=False).encode("utf-8"),
+                           file_name="swi_history.csv",
+                           mime="text/csv")
+        if st.button("Clear History"):
+            st.session_state.history = []
+            st.rerun()
+
+# ==============================
+# Article Info tab
+# ==============================
+with tab_article:
+    st.markdown("### Article & Authors")
+    st.markdown(
+        f"""
+        <div style="font-size:28px; font-weight:800; line-height:1.25;">
+        {ARTICLE_TITLE}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div style="font-size:20px; font-weight:700; margin-top:0.5rem;">
+        {ARTICLE_AUTHORS}
+        </div>
+        """, unsafe_allow_html=True,
+    )
+    if ARTICLE_AFFILS:
+        st.markdown(
+            "<div style='font-size:18px; margin-top:0.5rem;'>"
+            + "<br>".join(ARTICLE_AFFILS) +
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    if ARTICLE_JOURNAL and ARTICLE_JOURNAL.strip():
+        st.markdown(
+            f"<div style='font-size:18px; font-style:italic; margin-top:0.6rem;'>"
+            f"{ARTICLE_JOURNAL}</div>",
+            unsafe_allow_html=True,
+        )
+
+    citation = (
+        f"{ARTICLE_AUTHORS.replace(';', ',')} (n.d.). {ARTICLE_TITLE}. {ARTICLE_JOURNAL}."
+    )
+    st.download_button("Download Citation (.txt)", data=citation.encode("utf-8"),
+                       file_name="citation.txt", mime="text/plain")
