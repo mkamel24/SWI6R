@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------
 # SWI Wedge Length Ratio (L/Lo) — Smart Predictor (CatBoost)
-#   - Styled to match your first GUI (cards, big-number, tabs)
-#   - Defaults to CatBoost model at C:/Users/asus1/Desktop/CGB.joblib
-#   - Forces CPU + single thread for deterministic inference (best-effort)
+#   - Model: repo-relative models/CGB.joblib
+#   - GUI title == paper title (slightly smaller font)
+#   - Authors & affiliations updated per provided text
+#   - Clean card-style UI (inputs left, sketch right, actions bottom)
 # ------------------------------------------------------------
 
 import io
@@ -138,22 +139,30 @@ st.markdown(
 )
 
 # ==============================
-# Article strings (keep/edit)
+# Paper strings (updated)
 # ==============================
-ARTICLE_TITLE   = "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for Saltwater Intrusion Control with Explainable ML and GUI Deployment"
-ARTICLE_AUTHORS = "Mohamed Kamel Elshaarawy¹,*; Asaad M. Armanuos²,*"
+ARTICLE_TITLE = (
+    "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for "
+    "Saltwater Intrusion Control with Explainable ML and GUI Deployment"
+)
+ARTICLE_AUTHORS_HTML = (
+    "Mohamed Kamel Elshaarawy<sup>1,*</sup> &amp; "
+    "Asaad M. Armanuos<sup>2,*</sup>"
+)
+ARTICLE_AFFILS_HTML = (
+    "1 Civil Engineering Department, Faculty of Engineering, Horus University-Egypt, "
+    "New Damietta 34517, Egypt; <a href='mailto:melshaarawy@horus.edu.eg'>melshaarawy@horus.edu.eg</a> (M.K.E.)<br>"
+    "2 Irrigation and Hydraulics Engineering Department, Faculty of Engineering, Tanta University, "
+    "Tanta 31733, Egypt; <a href='mailto:asaad.matter@f-eng.tanta.edu.eg'>asaad.matter@f-eng.tanta.edu.eg</a> (A.M.A.)<br>"
+    "*Corresponding author"
+)
 ARTICLE_JOURNAL = "Catena"
-ARTICLE_AFFILS  = [
-    "¹ Affiliation (update here)",
-    "² Affiliation (update here)",
-]
 
 # ==============================
 # App configuration
 # ==============================
-MODEL_PATH_DEFAULT = r"C:/Users/asus1/Desktop/CGB.joblib"  # <-- CatBoost model here
+MODEL_PATH_DEFAULT = "models/CGB.joblib"  # repo-relative CatBoost model
 IMAGE_CANDIDATES = [
-    Path(r"C:/Users/asus1/Desktop/sketch.png"),
     Path("assets/sketch.png"),
     Path("assets/sketch22.png"),
     Path("sketch.png"),
@@ -230,7 +239,7 @@ if "current_inputs" not in st.session_state:
 if "sketch_bytes" not in st.session_state:
     st.session_state.sketch_bytes = None
 if "image_path" not in st.session_state:
-    st.session_state.image_path = str(IMAGE_CANDIDATES[0]) if IMAGE_CANDIDATES else ""
+    st.session_state.image_path = ""  # optional manual path if you want
 
 # ==============================
 # Utilities
@@ -243,23 +252,17 @@ def load_model(path_or_bytes):
     return joblib.load(path_or_bytes)
 
 def force_deterministic_cpu(model_obj):
-    """
-    Best-effort: make CatBoost run on CPU with single thread.
-    Works when the loaded object is catboost.CatBoostRegressor/Classifier
-    or a scikit wrapper with set_params().
-    """
+    """Best-effort: make CatBoost run on CPU with single thread."""
     try:
         import catboost
         if isinstance(model_obj, (catboost.CatBoostRegressor, catboost.CatBoostClassifier)):
             try:
-                # Most common CatBoost knobs for inference determinism/CPU
                 model_obj.set_params(task_type='CPU', thread_count=1, random_seed=42)
             except Exception:
                 pass
     except Exception:
-        pass  # CatBoost not installed or different estimator
+        pass
     try:
-        # Scikit-style escape hatch
         if hasattr(model_obj, "set_params"):
             model_obj.set_params(thread_count=1)
     except Exception:
@@ -330,8 +333,10 @@ with st.sidebar:
     st.header("Model & Resources")
 
     st.subheader("Model (CatBoost .joblib)")
-    model_source = st.radio("Load model from:", ["Path", "Upload"], horizontal=True)
-    if model_source == "Path":
+    model_source = st.radio("Load model from:", ["Repo path", "Upload"], horizontal=True)
+
+    if model_source == "Repo path":
+        st.write("Using repo-relative default: `models/CGB.joblib`")
         mp = st.text_input("Model path (.joblib)", st.session_state.model_path)
         c1, c2 = st.columns([1,1])
         with c1:
@@ -355,14 +360,23 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Model load failed: {e}")
 
-    st.subheader("Reference Image (fallback path)")
+    st.subheader("Reference Image (optional fallback path)")
     st.session_state.image_path = st.text_input("Image path", st.session_state.image_path)
 
 # ==============================
-# Header
+# Header (paper title, smaller font)
 # ==============================
-st.title("SWI Wedge Length Ratio – Smart Predictor (L/Lo, CatBoost)")
-st.caption("CatBoost model • quick, reliable, and clean UI.")
+st.markdown(
+    f"""
+    <div style="font-size:26px; font-weight:800; line-height:1.25; margin-bottom:.25rem;">
+      {ARTICLE_TITLE}
+    </div>
+    <div style="color:#666; margin-bottom:.75rem;">
+      CatBoost model: <code>{MODEL_PATH_DEFAULT}</code>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ==============================
 # Tabs
@@ -473,7 +487,7 @@ with tab_predict:
 
         img = find_local_image()
         if img is None:
-            st.info("No image found. Set a valid path in the sidebar, add one at `assets/sketch.png`, or upload above.")
+            st.info("No image found. Place one at `assets/sketch.png` / `assets/sketch22.png`, set a path in the sidebar, or upload above.")
         else:
             st.image(img, use_container_width=True)
 
@@ -533,41 +547,48 @@ with tab_hist:
             st.rerun()
 
 # ==============================
-# Article Info tab
+# Article Info tab (paper title smaller; updated authors & affiliations)
 # ==============================
 with tab_article:
     st.markdown("### Article & Authors")
+
     st.markdown(
         f"""
-        <div style="font-size:28px; font-weight:800; line-height:1.25;">
-        {ARTICLE_TITLE}
+        <div style="font-size:24px; font-weight:800; line-height:1.25;">
+          {ARTICLE_TITLE}
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.markdown(
         f"""
-        <div style="font-size:20px; font-weight:700; margin-top:0.5rem;">
-        {ARTICLE_AUTHORS}
+        <div style="font-size:18px; font-weight:700; margin-top:0.5rem;">
+          {ARTICLE_AUTHORS_HTML}
         </div>
-        """, unsafe_allow_html=True,
+        """,
+        unsafe_allow_html=True,
     )
-    if ARTICLE_AFFILS:
-        st.markdown(
-            "<div style='font-size:18px; margin-top:0.5rem;'>"
-            + "<br>".join(ARTICLE_AFFILS) +
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    if ARTICLE_JOURNAL and ARTICLE_JOURNAL.strip():
-        st.markdown(
-            f"<div style='font-size:18px; font-style:italic; margin-top:0.6rem;'>"
-            f"{ARTICLE_JOURNAL}</div>",
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f"""
+        <div style="font-size:16px; margin-top:0.5rem;">
+          {ARTICLE_AFFILS_HTML}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div style="font-size:16px; font-style:italic; margin-top:0.6rem;">
+          {ARTICLE_JOURNAL}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     citation = (
-        f"{ARTICLE_AUTHORS.replace(';', ',')} (n.d.). {ARTICLE_TITLE}. {ARTICLE_JOURNAL}."
+        "Elshaarawy, M.K., & Armanuos, A.M. (n.d.). "
+        "Simulating the Effectiveness of Artificial Recharge and Cutoff Walls for Saltwater Intrusion Control "
+        "with Explainable ML and GUI Deployment. Catena."
     )
     st.download_button("Download Citation (.txt)", data=citation.encode("utf-8"),
                        file_name="citation.txt", mime="text/plain")
