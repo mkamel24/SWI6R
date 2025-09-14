@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------
 # SWI Wedge Length Ratio (L/Lo) — Smart Predictor (CatBoost)
-#   - Model load: repo path models/CGB.joblib OR upload .joblib
-#   - Clean, card-style GUI (Predict, Explain (SHAP), Batch, History, Article Info)
+#   - Auto-loads model from repo: models/CGB.joblib (no manual action)
+#   - If not found, searches the repo for CGB.joblib
+#   - Clean card-style GUI + Explain (SHAP) + Batch + History + Article Info
 #   - Paper title as header (reduced font) + updated authors/affiliations
 #   - Deterministic CPU inference where possible
 # ------------------------------------------------------------
@@ -176,7 +177,11 @@ ARTICLE_JOURNAL = "Catena"
 # ==============================
 # Config / constants
 # ==============================
-MODEL_PATH_DEFAULT = "models/CGB.joblib"  # repo-relative CatBoost model
+MODEL_NAME = "CGB.joblib"
+MODEL_CANDIDATES = [
+    Path("models") / MODEL_NAME,  # primary (repo)
+    Path(MODEL_NAME),             # root fallback
+]
 IMAGE_CANDIDATES = [
     Path("assets/sketch22.png"),
     Path("assets/sketch.png"),
@@ -207,7 +212,6 @@ HELP = {
     "Db/Lo": "Barrier wall depth (relative).",
 }
 
-# Defaults (tune for your dataset)
 DEFAULTS = {
     "ρs/ρf": 1.025,
     "K/Ko": 1.000,
@@ -219,7 +223,7 @@ DEFAULTS = {
     "Db/Lo": 0.323,
 }
 
-# Reasonable global ranges for SHAP uniform background (edit if you have dataset mins/maxes)
+# Ranges for SHAP uniform background (edit if you have dataset mins/maxes)
 FEATURE_RANGES = {
     "ρs/ρf":       (0.995, 1.035, DEFAULTS["ρs/ρf"]),
     "K/Ko":        (0.30,  2.50,  DEFAULTS["K/Ko"]),
@@ -271,17 +275,8 @@ def _force_catboost_cpu_single_thread(model_obj):
         pass
     return model_obj
 
-def _ordered_df(values: dict, expected_names: list | None):
-    """Build 1-row DataFrame in model's expected order when available."""
-    if expected_names and set(map(str, expected_names)) == set(FEATURE_KEYS):
-        cols = list(map(str, expected_names))
-    else:
-        cols = FEATURE_KEYS[:]
-    row = [values[c] for c in cols]
-    return pd.DataFrame([row], columns=cols).astype(np.float32)
-
 def _get_model_feature_names(model_obj):
-    """Try to read feature names from model (CatBoost/pandas training)."""
+    """Try to read feature names from model (pandas-trained)."""
     names = None
     for attr in ("feature_names_in_", "feature_names_", "feature_names"):
         if hasattr(model_obj, attr):
@@ -293,6 +288,15 @@ def _get_model_feature_names(model_obj):
             except Exception:
                 pass
     return names
+
+def _ordered_df(values: dict, expected_names: list | None):
+    """Build 1-row DataFrame in model's expected order when available."""
+    if expected_names and set(map(str, expected_names)) == set(FEATURE_KEYS):
+        cols = list(map(str, expected_names))
+    else:
+        cols = FEATURE_KEYS[:]
+    row = [values[c] for c in cols]
+    return pd.DataFrame([row], columns=cols).astype(np.float32)
 
 def json_download_bytes(obj):
     buf = BytesIO()
@@ -328,15 +332,66 @@ def clip_to_bounds(vals: dict) -> dict:
         out[k] = min(max(float(v), float(lo)), float(hi))
     return out
 
+def _discover_model_path() -> Path:
+    """Return the first existing path to CGB.joblib or raise FileNotFoundError."""
+    for p in MODEL_CANDIDATES:
+        if p.exists():
+            return p
+    # Last resort: search the repo tree
+    for p in Path(".").rglob(MODEL_NAME):
+        return p
+    raise FileNotFoundError(f"Could not find {MODEL_NAME}. Expected at: "
+                            + ", ".join(str(p) for p in MODEL_CANDIDATES))
+
+# ==============================
+# Cached resources
+# ==============================
+@st.cache_resource(show_spinner=True)
+def load_model_and_explainer():
+    """Auto-load CatBoost model from repo and prepare SHAP explainer."""
+    model_path = _discover_model_path()
+    model = joblib.load(model_path)
+    model = _force_catboost_cpu_single_thread(model)
+    expected = _get_model_feature_names(model)
+    explainer = shap.Explainer(model)
+    return model, expected, explainer, str(model_path)
+
+@st.cache_data(show_spinner=False)
+def shap_background_values_uniform(n: int, rk: tuple, seed: int | None, expected_names):
+    """Global SHAP on synthetic (uniform) background."""
+    model, _, explainer, _ = load_model_and_explainer()
+    df_bg = sample_background_df(FEATURE_RANGES, n, seed)
+    # Align to model's column order
+    X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names)
+    X_bg = df_bg[X_bg.columns]
+    sv = explainer(X_bg)
+    return sv, X_bg
+
+@st.cache_data(show_spinner=False)
+def shap_background_values_dataset(file_bytes: bytes, n: int, seed: int | None, expected_names):
+    """Global SHAP on dataset background (uploaded CSV)."""
+    model, _, explainer, _ = load_model_and_explainer()
+    df = pd.read_csv(BytesIO(file_bytes))
+    if not set(FEATURE_KEYS).issubset(df.columns):
+        missing = [c for c in FEATURE_KEYS if c not in df.columns]
+        raise ValueError(f"Dataset missing columns: {missing}")
+    # Align & sample
+    ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
+    if len(df) > n:
+        df = df.sample(n=n, random_state=None if seed is None else int(seed))
+    X_bg = df[ordered_cols].astype(np.float32)
+    sv = explainer(X_bg)
+    return sv, X_bg
+
+def predict_one(values_dict):
+    model, expected, _, _ = load_model_and_explainer()
+    X = _ordered_df(values_dict, expected)
+    y = model.predict(X.values)  # CatBoost accepts ndarray
+    return float(np.ravel(y)[0])
+
 # ==============================
 # Session state
 # ==============================
-if "model" not in st.session_state:
-    st.session_state.model = None
-if "model_origin" not in st.session_state:
-    st.session_state.model_origin = f"path:{MODEL_PATH_DEFAULT}"
-if "expected_names" not in st.session_state:
-    st.session_state.expected_names = None
 if "last_inputs" not in st.session_state:
     st.session_state.last_inputs = None
 if "history" not in st.session_state:
@@ -351,52 +406,22 @@ if "bg_file_bytes" not in st.session_state:
     st.session_state.bg_file_bytes = None
 
 # ==============================
-# Sidebar: model loader (repo path OR upload)
+# Header (paper title, smaller font)
 # ==============================
-with st.sidebar:
-    st.header("Model Loader")
-    mode = st.radio("Load CatBoost model from:", ["Repo path", "Upload"], horizontal=True)
+# Show model source path (or error) right under the title.
+try:
+    _, _, _, _model_path = load_model_and_explainer()
+    model_source_html = f"Model source: <code>{_model_path}</code>"
+except Exception as _e:
+    model_source_html = f"<span style='color:#B00020;'>Model not loaded: {_e}</span>"
 
-    if mode == "Repo path":
-        exists = Path(MODEL_PATH_DEFAULT).exists()
-        st.caption(f"Default path: `{MODEL_PATH_DEFAULT}` — {'✅ found' if exists else '❗ not found'}")
-        mp = st.text_input("Model path (.joblib)", MODEL_PATH_DEFAULT)
-        if st.button("Load model", type="primary", use_container_width=True):
-            try:
-                st.session_state.model = joblib.load(mp)
-                st.session_state.model = _force_catboost_cpu_single_thread(st.session_state.model)
-                st.session_state.expected_names = _get_model_feature_names(st.session_state.model)
-                st.session_state.model_origin = f"path:{mp}"
-                st.success("Model loaded from path.")
-            except Exception as e:
-                st.error(f"Model load failed: {e}")
-    else:
-        up_model = st.file_uploader("Upload .joblib model", type=["joblib"])
-        if up_model and st.button("Load uploaded model", type="primary", use_container_width=True):
-            try:
-                st.session_state.model = joblib.load(io.BytesIO(up_model.read()))
-                st.session_state.model = _force_catboost_cpu_single_thread(st.session_state.model)
-                st.session_state.expected_names = _get_model_feature_names(st.session_state.model)
-                st.session_state.model_origin = "upload:memory"
-                st.success("Uploaded model loaded.")
-            except Exception as e:
-                st.error(f"Model load failed: {e}")
-
-    if st.button("Clear model", use_container_width=True):
-        st.session_state.model = None
-        st.session_state.expected_names = None
-        st.info("Model cleared.")
-
-# ==============================
-# Header (paper title smaller font)
-# ==============================
 st.markdown(
     f"""
     <div style="font-size:26px; font-weight:800; line-height:1.25; margin-bottom:.25rem;">
       {ARTICLE_TITLE}
     </div>
     <div class="muted" style="margin-bottom:.75rem;">
-      Model source: <code>{st.session_state.model_origin}</code>
+      {model_source_html}
     </div>
     """,
     unsafe_allow_html=True,
@@ -408,7 +433,7 @@ tab_predict, tab_explain, tab_batch, tab_hist, tab_article = st.tabs(
 )
 
 # ==============================
-# Predict tab
+# PREDICT TAB
 # ==============================
 with tab_predict:
     col_left, col_right = st.columns([3, 2], gap="large")
@@ -449,21 +474,16 @@ with tab_predict:
         c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
         with c1:
             if st.button("Predict", use_container_width=True, type="primary"):
-                if st.session_state.model is None:
-                    st.error("Please load the CatBoost model (sidebar).")
-                else:
-                    try:
-                        vals = clip_to_bounds(st.session_state.current_inputs)
-                        X = _ordered_df(vals, st.session_state.expected_names)
-                        y = st.session_state.model.predict(X.values)
-                        y = float(np.ravel(y)[0])
-                        st.session_state.current_pred = y
-                        st.session_state.last_inputs = st.session_state.current_inputs.copy()
-                        rec = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **vals, "Prediction": round(y, 6)}
-                        st.session_state.history.append(rec)
-                        st.success("Prediction complete.")
-                    except Exception as e:
-                        st.error(f"Prediction error: {e}")
+                try:
+                    vals = clip_to_bounds(st.session_state.current_inputs)
+                    y = predict_one(vals)
+                    st.session_state.current_pred = y
+                    st.session_state.last_inputs = st.session_state.current_inputs.copy()
+                    rec = {"Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), **vals, "Prediction": round(y, 6)}
+                    st.session_state.history.append(rec)
+                    st.success("Prediction complete.")
+                except Exception as e:
+                    st.error(f"Prediction error: {e}")
         with c2:
             if st.button("Clear", use_container_width=True):
                 st.session_state.current_pred = None
@@ -514,117 +534,94 @@ with tab_predict:
             st.image(img, use_container_width=True)
 
 # ==============================
-# Explain tab (SHAP)
+# EXPLAIN TAB (SHAP)
 # ==============================
 with tab_explain:
     st.markdown("### Explain (SHAP)")
-    if st.session_state.model is None:
-        st.info("Load a model first (sidebar) to enable SHAP explanations.")
-    else:
+    try:
+        model, expected_names, _, _ = load_model_and_explainer()
         bg_src = st.radio("Background source for global SHAP:",
-                          ["Uniform (use bounds below)", "Dataset (upload CSV)"],
+                          ["Uniform (use slider bounds)", "Dataset (upload CSV)"],
                           horizontal=True)
         n_bg = st.slider("Background sample size", 100, 2000, 256, 50,
                          help="Larger = smoother but slower. 256–512 is good for 8 features.")
-        seed = st.number_input("Random seed", min_value=0, max_value=10000, value=42, step=1)
+        seed = st.number_input("Random seed (optional)", min_value=0, max_value=10_000, value=42, step=1)
+
+        if bg_src.startswith("Uniform"):
+            sv_bg, X_bg = shap_background_values_uniform(n=n_bg, rk=ranges_key_tuple(),
+                                                         seed=int(seed), expected_names=expected_names)
+        else:
+            up_bg = st.file_uploader("Upload CSV for SHAP background", type=["csv"], key="bg_csv")
+            if up_bg is None:
+                st.info("Upload a CSV with the 8 feature columns to compute dataset-based SHAP.")
+                st.stop()
+            sv_bg, X_bg = shap_background_values_dataset(up_bg.read(), n=n_bg,
+                                                         seed=int(seed), expected_names=expected_names)
+
+        # Global: bar + beeswarm
+        colA, colB = st.columns(2)
+        with colA:
+            st.write("**Mean absolute SHAP (bar)**")
+            fig = plt.figure(figsize=(7, 4))
+            shap.summary_plot(sv_bg.values, X_bg, plot_type="bar", show=False)
+            st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+        with colB:
+            st.write("**Beeswarm (distribution of impacts)**")
+            fig = plt.figure(figsize=(7, 4))
+            shap.summary_plot(sv_bg.values, X_bg, show=False)
+            st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+
+        # Dependence plots
+        mean_abs = np.mean(np.abs(sv_bg.values), axis=0)
+        ordered_cols = list(X_bg.columns)
+        order_idx = np.argsort(-mean_abs)
+        top_feats = [ordered_cols[i] for i in order_idx[:5]]
+
+        st.write("**Dependence plots**")
+        dep1 = st.selectbox("Primary feature", top_feats, index=0, key="dep1")
+        dep2_options = ["(auto color)"] + [c for c in ordered_cols if c != dep1]
+        dep2 = st.selectbox("Color by (optional)", dep2_options, index=0, key="dep2")
+        interaction = dep2 if dep2 != "(auto color)" else "auto"
 
         try:
-            # Build background data
-            if bg_src.startswith("Uniform"):
-                df_bg = sample_background_df(FEATURE_RANGES, n_bg, int(seed))
+            fig, ax = plt.subplots(figsize=(7, 4))
+            shap.dependence_plot(dep1, sv_bg.values, X_bg,
+                                 interaction_index=interaction, show=False, ax=ax)
+            st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+            plt.close(fig)
+        except Exception:
+            fig, ax = plt.subplots(figsize=(7, 4))
+            if dep2 == "(auto color)":
+                shap.plots.scatter(sv_bg[:, dep1], ax=ax, show=False)
             else:
-                up_bg = st.file_uploader("Upload CSV with columns matching the model features", type=["csv"], key="bg_csv")
-                if up_bg is None:
-                    st.info("Upload a CSV containing the 8 feature columns to compute dataset-based SHAP.")
-                    st.stop()
-                df = pd.read_csv(up_bg)
-                missing = [c for c in FEATURE_KEYS if c not in df.columns]
-                if missing:
-                    st.error(f"Dataset missing columns: {missing}")
-                    st.stop()
-                if len(df) > n_bg:
-                    df_bg = df.sample(n=n_bg, random_state=int(seed)).reset_index(drop=True)
-                else:
-                    df_bg = df.copy().reset_index(drop=True)
+                shap.plots.scatter(sv_bg[:, dep1], color=sv_bg[:, dep2], ax=ax, show=False)
+            st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+            plt.close(fig)
 
-            # Align column order to model expectation
-            expected_names = st.session_state.expected_names
-            X_bg = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names)
-            X_bg = df_bg[X_bg.columns].astype(np.float32)
-
-            # Explainer + SHAP values
-            explainer = shap.Explainer(st.session_state.model)
-            sv_bg = explainer(X_bg)
-
-            # Global: bar + beeswarm
-            colA, colB = st.columns(2)
-            with colA:
-                st.write("**Mean absolute SHAP (bar)**")
-                fig = plt.figure(figsize=(7, 4))
-                shap.summary_plot(sv_bg.values, X_bg, plot_type="bar", show=False)
-                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
-            with colB:
-                st.write("**Beeswarm (distribution of impacts)**")
-                fig = plt.figure(figsize=(7, 4))
-                shap.summary_plot(sv_bg.values, X_bg, show=False)
-                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
-
-            # Dependence plots
-            mean_abs = np.mean(np.abs(sv_bg.values), axis=0)
-            ordered_cols = list(X_bg.columns)
-            order_idx = np.argsort(-mean_abs)
-            top_feats = [ordered_cols[i] for i in order_idx[:5]]
-
-            st.write("**Dependence plots**")
-            dep1 = st.selectbox("Primary feature", top_feats, index=0, key="dep1")
-            dep2_options = ["(auto color)"] + [c for c in ordered_cols if c != dep1]
-            dep2 = st.selectbox("Color by (optional)", dep2_options, index=0, key="dep2")
-            interaction = dep2 if dep2 != "(auto color)" else "auto"
-
-            try:
-                fig, ax = plt.subplots(figsize=(7, 4))
-                shap.dependence_plot(
-                    dep1,
-                    sv_bg.values,
-                    X_bg,
-                    interaction_index=interaction,
-                    show=False,
-                    ax=ax
-                )
-                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
-                plt.close(fig)
-            except Exception:
-                fig, ax = plt.subplots(figsize=(7, 4))
-                if dep2 == "(auto color)":
-                    shap.plots.scatter(sv_bg[:, dep1], ax=ax, show=False)
-                else:
-                    shap.plots.scatter(sv_bg[:, dep1], color=sv_bg[:, dep2], ax=ax, show=False)
-                st.pyplot(fig, clear_figure=True, bbox_inches="tight")
-                plt.close(fig)
-
-            # Local SHAP for current inputs
-            with st.expander("Local explanation for current inputs", expanded=True):
-                if st.session_state.current_pred is None:
-                    st.info("Make a prediction first in the Predict tab to see the local explanation.")
-                else:
-                    values = {k: float(st.session_state.current_inputs[k]) for k in FEATURE_KEYS}
-                    X_one = _ordered_df(values, expected_names)
-                    sv_one = explainer(X_one)
-                    st.write("**Waterfall (feature contributions)**")
-                    try:
-                        fig = plt.figure(figsize=(7, 5))
-                        shap.plots.waterfall(sv_one[0], max_display=8, show=False)
-                        st.pyplot(fig, clear_figure=True, bbox_inches="tight")
-                    except Exception:
-                        fig = plt.figure(figsize=(7, 4))
-                        shap.plots.bar(sv_one[0], show=False, max_display=8)
-                        st.pyplot(fig, clear_figure=True, bbox_inches="tight")
-
-        except Exception as e:
-            st.error(f"SHAP error: {e}")
+        # Local SHAP for current inputs
+        with st.expander("Local explanation for current inputs", expanded=True):
+            if st.session_state.current_pred is None:
+                st.info("Make a prediction first in the Predict tab to see the local explanation.")
+            else:
+                values = {k: float(st.session_state.current_inputs[k]) for k in FEATURE_KEYS}
+                X_one = _ordered_df(values, expected_names)
+                explainer = shap.Explainer(model)
+                sv_one = explainer(X_one)
+                st.write("**Waterfall (feature contributions)**")
+                try:
+                    fig = plt.figure(figsize=(7, 5))
+                    shap.plots.waterfall(sv_one[0], max_display=8, show=False)
+                    st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+                except Exception:
+                    fig = plt.figure(figsize=(7, 4))
+                    shap.plots.bar(sv_one[0], show=False, max_display=8)
+                    st.pyplot(fig, clear_figure=True, bbox_inches="tight")
+    except Exception as e:
+        st.info("Load error or SHAP unavailable:")
+        st.error(e)
 
 # ==============================
-# Batch tab
+# BATCH TAB
 # ==============================
 with tab_batch:
     st.markdown("### Batch Predictions (CSV → CSV)")
@@ -633,32 +630,29 @@ with tab_batch:
 
     up = st.file_uploader("Upload CSV", type=["csv"])
     if up:
-        if st.session_state.model is None:
-            st.error("Load the CatBoost model first (sidebar).")
-        else:
-            try:
-                df = pd.read_csv(up)
-                missing = [c for c in FEATURE_KEYS if c not in df.columns]
-                if missing:
-                    st.error(f"CSV missing columns: {missing}")
-                else:
-                    expected_names = st.session_state.expected_names
-                    ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
-                    X = df[ordered_cols].astype(np.float32).values
-                    preds = st.session_state.model.predict(X)
-                    preds = np.ravel(preds).astype(float)
-                    out = df.copy()
-                    out["Pred_L_over_Lo"] = preds
-                    st.success("Batch predictions complete.")
-                    st.dataframe(out.head(20), use_container_width=True)
-                    st.download_button("Download predictions CSV",
-                                       data=out.to_csv(index=False).encode("utf-8"),
-                                       file_name="predictions.csv", mime="text/csv")
-            except Exception as e:
-                st.error(f"Batch error: {e}")
+        try:
+            model, expected_names, _, _ = load_model_and_explainer()
+            df = pd.read_csv(up)
+            missing = [c for c in FEATURE_KEYS if c not in df.columns]
+            if missing:
+                st.error(f"CSV missing columns: {missing}")
+            else:
+                ordered_cols = _ordered_df({k: 0.0 for k in FEATURE_KEYS}, expected_names).columns
+                X = df[ordered_cols].astype(np.float32).values
+                preds = model.predict(X)
+                preds = np.ravel(preds).astype(float)
+                out = df.copy()
+                out["Pred_L_over_Lo"] = preds
+                st.success("Batch predictions complete.")
+                st.dataframe(out.head(20), use_container_width=True)
+                st.download_button("Download predictions CSV",
+                                   data=out.to_csv(index=False).encode("utf-8"),
+                                   file_name="predictions.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"Batch error: {e}")
 
 # ==============================
-# History tab
+# HISTORY TAB
 # ==============================
 with tab_hist:
     st.markdown("### Session History")
@@ -675,7 +669,7 @@ with tab_hist:
             st.rerun()
 
 # ==============================
-# Article Info tab
+# ARTICLE INFO TAB
 # ==============================
 with tab_article:
     st.markdown("### Article & Authors")
@@ -706,7 +700,8 @@ with tab_article:
         <div style="font-size:16px; font-style:italic; margin-top:0.6rem;">
         {ARTICLE_JOURNAL}
         </div>
-        """, unsafe_allow_html=True,
+        """,
+        unsafe_allow_html=True,
     )
 
     citation = (
